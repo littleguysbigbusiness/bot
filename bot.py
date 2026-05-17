@@ -16,7 +16,7 @@ SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1420690312531017850
-STATUS_MSG_FILE   = "status_message_id.txt"
+STATIC_STATUS_ID  = 1505559844449419284  # Static message ID to edit in place
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:M"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:M:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
@@ -100,7 +100,7 @@ def get_user_warnings(user_id):
     results = []
     for i, row in enumerate(read_all_rows()):
         row = pad(row)
-        if row[COL_USER_ID].strip() == str(user_id):
+        if row[COL_USER_ID].strip() == str(user_id).strip():
             results.append((row, i + 2))
     return results
 
@@ -200,7 +200,7 @@ async def dm_user(user, embed):
     except discord.Forbidden:
         return False
 
-# ── Status Loop ────────────────────────────────────────────────────────────────
+# ── Status Loop (Edits Your Static Message) ───────────────────────────────────
 @tasks.loop(seconds=60)
 async def update_status_embed():
     try:
@@ -214,28 +214,16 @@ async def update_status_embed():
             return
 
         embed = build_status_embed(resp.json())
-        msg_id = None
 
-        if os.path.exists(STATUS_MSG_FILE):
-            with open(STATUS_MSG_FILE) as f:
-                try:
-                    msg_id = int(f.read().strip())
-                except Exception:
-                    msg_id = None
-
-        if msg_id:
-            try:
-                msg = await channel.fetch_message(msg_id)
-                await msg.edit(embed=embed)
-                print(f"[Status] Updated embed at {datetime.datetime.utcnow().strftime('%H:%M:%S')} UTC")
-                return
-            except discord.NotFound:
-                pass
-
-        msg = await channel.send(embed=embed)
-        with open(STATUS_MSG_FILE, "w") as f:
-            f.write(str(msg.id))
-        print(f"[Status] Posted new embed (ID: {msg.id})")
+        try:
+            msg = await channel.fetch_message(STATIC_STATUS_ID)
+            await msg.edit(embed=embed)
+            print(f"[Status] Successfully edited static message {STATIC_STATUS_ID}")
+            return
+        except discord.NotFound:
+            print(f"⚠️ Could not find static message ID {STATIC_STATUS_ID} in channel.")
+        except discord.Forbidden:
+            print("❌ Lacking permissions to modify static message.")
 
     except Exception as e:
         print(f"[Status] Error: {e}")
@@ -257,26 +245,36 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
     append_row([str(user.id), str(user), str(interaction.user), reason, "Warning",
                 timestamp[:10], "N/A", warning_id, timestamp, "TRUE", "FALSE", "", "Discord"])
 
-    dm_embed = discord.Embed(title="⚠️ You Have Been Warned",
-                             description=f"You received a warning in **{interaction.guild.name}**.",
-                             color=discord.Color.orange())
-    dm_embed.add_field(name="Reason",    value=reason,              inline=False)
-    dm_embed.add_field(name="Warning ID", value=f"`{warning_id}`", inline=True)
-    dm_embed.add_field(name="Issued by", value=str(interaction.user), inline=True)
-    dm_embed.add_field(name="Total Active Warnings", value=str(active_count), inline=True)
-    dm_embed.set_footer(text="Please follow the server rules to avoid further action.")
+    # High-Visibility DM panel
+    dm_embed = discord.Embed(
+        title="⚠️ FORMAL WARNING ISSUED",
+        description=f"An official warning has been registered for your account in **{interaction.guild.name}**.\nPlease review our server guidelines to avoid further disciplinary restrictions.",
+        color=discord.Color.from_rgb(230, 126, 34)
+    )
+    dm_embed.add_field(name="📋 Violation Reason", value=f"```\n{reason}\n```", inline=False)
+    dm_embed.add_field(name="🆔 Incident ID", value=f"`{warning_id}`", inline=True)
+    dm_embed.add_field(name="👮 Issued By", value=str(interaction.user), inline=True)
+    dm_embed.add_field(name="📈 Total Record", value=f"**{active_count}** active warning(s)", inline=True)
+    dm_embed.set_footer(text="Automated Compliance System")
     dm_embed.timestamp = datetime.datetime.utcnow()
     dm_sent = await dm_user(user, dm_embed)
 
-    embed = discord.Embed(title="⚠️ Warning Issued", color=discord.Color.orange())
+    # Wide Widescreen Channel Panel
+    embed = discord.Embed(
+        title="🛑 INFRACTION LOGGED",
+        description="A formal warning has been recorded against this user file. The details have been successfully synchronized with the central administration database.",
+        color=discord.Color.from_rgb(192, 41, 43)
+    )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="User",           value=user.mention,             inline=True)
-    embed.add_field(name="Warning ID",     value=f"`{warning_id}`",        inline=True)
-    embed.add_field(name="Total Warnings", value=str(active_count),        inline=True)
-    embed.add_field(name="Reason",         value=reason,                   inline=False)
-    embed.add_field(name="Issued by",      value=interaction.user.mention, inline=True)
-    embed.add_field(name="DM Sent",        value="✅ Yes" if dm_sent else "❌ DMs closed", inline=True)
-    embed.set_footer(text=f"Use /revokewarning {warning_id} to undo")
+    
+    embed.add_field(name="👤 Target User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
+    embed.add_field(name="🆔 Warning Tracking ID", value=f"`{warning_id}`", inline=True)
+    embed.add_field(name="📊 Active Total", value=f"**{active_count}** infraction(s)", inline=True)
+    embed.add_field(name="📋 Formal Infraction Reason", value=f"```text\n{reason}\n```", inline=False)
+    embed.add_field(name="🛡️ Authorized Administrator", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="📥 Notification Status", value="✅ DM Dispatched" if dm_sent else "❌ User DMs Locked", inline=True)
+    
+    embed.set_footer(text=f"To remove this record, execute: /revokewarning {warning_id}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
@@ -296,25 +294,33 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
     append_row([str(user.id), str(user), str(interaction.user), reason, "Warning",
                 timestamp[:10], "N/A", warning_id, timestamp, "TRUE", "FALSE", "", "Discord"])
 
-    dm_embed = discord.Embed(title="⚠️ You Have Been Warned",
-                             description=f"You received a warning in **{interaction.guild.name}**.",
-                             color=discord.Color.orange())
-    dm_embed.add_field(name="Reason",    value=reason,              inline=False)
-    dm_embed.add_field(name="Warning ID", value=f"`{warning_id}`", inline=True)
-    dm_embed.add_field(name="Issued by", value=str(interaction.user), inline=True)
-    dm_embed.set_footer(text="Please follow the server rules.")
+    dm_embed = discord.Embed(
+        title="⚠️ FORMAL WARNING ISSUED",
+        description=f"An official warning has been registered for your account in **{interaction.guild.name}**.\nPlease review our server guidelines to avoid further disciplinary restrictions.",
+        color=discord.Color.from_rgb(230, 126, 34)
+    )
+    dm_embed.add_field(name="📋 Violation Reason", value=f"```\n{reason}\n```", inline=False)
+    dm_embed.add_field(name="🆔 Incident ID", value=f"`{warning_id}`", inline=True)
+    dm_embed.add_field(name="👮 Issued By", value=str(interaction.user), inline=True)
+    dm_embed.set_footer(text="Automated Compliance System")
     dm_embed.timestamp = datetime.datetime.utcnow()
     dm_sent = await dm_user(user, dm_embed)
 
-    embed = discord.Embed(title="⚠️ Warning Issued", color=discord.Color.orange())
+    embed = discord.Embed(
+        title="🛑 INFRACTION LOGGED",
+        description="A formal warning has been recorded against this user file. The details have been successfully synchronized with the central administration database.",
+        color=discord.Color.from_rgb(192, 41, 43)
+    )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="User",       value=user.mention,             inline=True)
-    embed.add_field(name="Warning ID", value=f"`{warning_id}`",        inline=True)
-    embed.add_field(name="Warnings",   value=str(active_count),        inline=True)
-    embed.add_field(name="Reason",     value=reason,                   inline=False)
-    embed.add_field(name="Issued by",  value=interaction.user.mention, inline=True)
-    embed.add_field(name="DM Sent",    value="✅ Yes" if dm_sent else "❌ DMs closed", inline=True)
-    embed.set_footer(text=f"Use /revokewarning {warning_id} to undo")
+    
+    embed.add_field(name="👤 Target User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
+    embed.add_field(name="🆔 Warning Tracking ID", value=f"`{warning_id}`", inline=True)
+    embed.add_field(name="📊 Active Total", value=f"**{active_count}** infraction(s)", inline=True)
+    embed.add_field(name="📋 Formal Infraction Reason", value=f"```text\n{reason}\n```", inline=False)
+    embed.add_field(name="🛡️ Authorized Administrator", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="📥 Notification Status", value="✅ DM Dispatched" if dm_sent else "❌ User DMs Locked", inline=True)
+    
+    embed.set_footer(text=f"To remove this record, execute: /revokewarning {warning_id}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
@@ -434,7 +440,7 @@ def run_discord_bot():
     print("🤖 Starting Discord Bot inside background thread...")
     bot.run(DISCORD_TOKEN)
 
-# This hooks the thread launchers cleanly into Gunicorn's boot sequence
+# Launch pipelines
 print("🛰️ Initializing multi-threaded background pipelines...")
 web_thread = threading.Thread(target=run_web_server, daemon=True)
 web_thread.start()
