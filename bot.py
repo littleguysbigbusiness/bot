@@ -5,10 +5,13 @@ import os
 import uuid
 import datetime
 import requests
+import threading
+from flask import Flask
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
-SHEETS_TOKEN      = os.environ.get("GOOGLESHEETS_ACCESS_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
@@ -34,11 +37,28 @@ COL_REVOKED     = 10
 COL_REVOKED_BY  = 11
 COL_SOURCE      = 12
 
-# ── Sheets helpers ─────────────────────────────────────────────────────────────
+# ── Google Service Account Authentication ─────────────────────────────────────
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+creds = None
+
+if os.path.exists("service_account.json"):
+    creds = service_account.Credentials.from_service_account_file(
+        "service_account.json", scopes=SCOPES
+    )
+else:
+    print("⚠️ WARNING: service_account.json not found inside Render storage!")
 
 def sheets_headers():
-    return {"Authorization": f"Bearer {SHEETS_TOKEN}", "Content-Type": "application/json"}
+    global creds
+    if creds:
+        if not creds.valid:
+            creds.refresh(Request())
+        token = creds.token
+    else:
+        token = ""
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
+# ── Sheets helpers ─────────────────────────────────────────────────────────────
 def pad(row, length=13):
     return list(row) + [""] * (length - len(row))
 
@@ -53,7 +73,9 @@ def read_all_rows():
 
 def append_row(row):
     try:
-        requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        resp = requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[Sheets] Append failed with status {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[Sheets] Append error: {e}")
 
@@ -61,7 +83,9 @@ def update_row(row_index, row):
     try:
         range_str = f"{SHEET_NAME}!A{row_index}:M{row_index}"
         url = f"{SHEET_UPDATE_BASE}{range_str}?valueInputOption=RAW"
-        requests.put(url, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        resp = requests.put(url, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        if resp.status_code != 200:
+            print(f"[Sheets] Update failed with status {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[Sheets] Update error: {e}")
 
@@ -81,7 +105,6 @@ def get_user_warnings(user_id):
     return results
 
 # ── Status Page ────────────────────────────────────────────────────────────────
-
 STATUS_EMOJI = {
     "operational":          "✅",
     "degraded_performance": "🟨",
@@ -138,10 +161,10 @@ def build_status_embed(data):
     embed.set_footer(text="🔄 Updates every 60 seconds  •  bwr7s.statuspage.io")
     return embed
 
-# ── Bot ────────────────────────────────────────────────────────────────────────
-
+# ── Bot Framework ─────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 
 class WarningsBot(commands.Bot):
     def __init__(self):
@@ -153,9 +176,10 @@ class WarningsBot(commands.Bot):
 
     async def on_ready(self):
         print(f"✅ Logged in as {self.user} (ID: {self.user.id})")
-        await self.change_presence(activity=discord.Activity(
-            type=discord.ActivityType.watching, name="for rule breakers 👀"
-        ))
+        await self.change_presence(
+            status=discord.Status.online,
+            activity=discord.Activity(type=discord.ActivityType.watching, name="for rule breakers 👀")
+        )
         if not update_status_embed.is_running():
             update_status_embed.start()
 
@@ -176,8 +200,7 @@ async def dm_user(user, embed):
     except discord.Forbidden:
         return False
 
-# ── Status loop ────────────────────────────────────────────────────────────────
-
+# ── Status Loop ────────────────────────────────────────────────────────────────
 @tasks.loop(seconds=60)
 async def update_status_embed():
     try:
@@ -204,7 +227,7 @@ async def update_status_embed():
             try:
                 msg = await channel.fetch_message(msg_id)
                 await msg.edit(embed=embed)
-                print(f"[Status] Updated at {datetime.datetime.utcnow().strftime('%H:%M:%S')} UTC")
+                print(f"[Status] Updated embed at {datetime.datetime.utcnow().strftime('%H:%M:%S')} UTC")
                 return
             except discord.NotFound:
                 pass
@@ -217,8 +240,7 @@ async def update_status_embed():
     except Exception as e:
         print(f"[Status] Error: {e}")
 
-# ── /warn ──────────────────────────────────────────────────────────────────────
-
+# ── Commands ───────────────────────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning")
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
@@ -258,8 +280,6 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
-# ── /issuewarning ──────────────────────────────────────────────────────────────
-
 @bot.tree.command(name="issuewarning", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning")
 async def issuewarning(interaction: discord.Interaction, user: discord.Member, reason: str):
@@ -297,8 +317,6 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
     embed.set_footer(text=f"Use /revokewarning {warning_id} to undo")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
-
-# ── /revokewarning ─────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="revokewarning", description="[Admin] Revoke a warning by its ID")
 @app_commands.describe(warning_id="Warning ID to revoke (e.g. AB12CD34)")
@@ -342,8 +360,6 @@ async def revokewarning(interaction: discord.Interaction, warning_id: str):
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
-# ── /viewmywarnings ────────────────────────────────────────────────────────────
-
 @bot.tree.command(name="viewmywarnings", description="View all your warnings (private)")
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -369,8 +385,6 @@ async def viewmywarnings(interaction: discord.Interaction):
     embed.set_footer(text=f"Total: {len(warnings)} | Active: {len(active)} | Revoked: {len(revoked)}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed, ephemeral=True)
-
-# ── /viewwarnings ──────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user")
 @app_commands.describe(user="The user to look up")
@@ -402,25 +416,28 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ── Run ────────────────────────────────────────────────────────────────────────
-# ── Run Web Server Framework & Bot ─────────────────────────────────────────────
-from flask import Flask
-import threading
-
+# ── Production Flask Engine Server ─────────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "BWR7 Warnings Bot is Online!", 200
+    return "BWR7 Warnings Bot is Online Framework Stable!", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 def run_discord_bot():
     if not DISCORD_TOKEN:
-        print("❌ ERROR: DISCORD_BOT_TOKEN is not set")
+        print("❌ ERROR: DISCORD_BOT_TOKEN environment variable is empty.")
         return
     print("🤖 Starting Discord Bot inside background thread...")
     bot.run(DISCORD_TOKEN)
 
-# This triggers the moment Gunicorn loads the 'app' object
-print("🛰️ Initializing background threads...")
+# This hooks the thread launchers cleanly into Gunicorn's boot sequence
+print("🛰️ Initializing multi-threaded background pipelines...")
+web_thread = threading.Thread(target=run_web_server, daemon=True)
+web_thread.start()
+
 discord_thread = threading.Thread(target=run_discord_bot, daemon=True)
 discord_thread.start()
