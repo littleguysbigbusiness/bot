@@ -245,36 +245,36 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
     append_row([str(user.id), str(user), str(interaction.user), reason, "Warning",
                 timestamp[:10], "N/A", warning_id, timestamp, "TRUE", "FALSE", "", "Discord"])
 
-    # High-Visibility DM panel
+    # Wide-set clean corporate DM panel
     dm_embed = discord.Embed(
-        title="⚠️ FORMAL WARNING ISSUED",
-        description=f"An official warning has been registered for your account in **{interaction.guild.name}**.\nPlease review our server guidelines to avoid further disciplinary restrictions.",
-        color=discord.Color.from_rgb(230, 126, 34)
+        title="⚠️ User Moderation Notice",
+        description="An official warning has been registered for your account profile. Please review our community standards to maintain server compliance.",
+        color=discord.Color.from_rgb(44, 62, 80) # Clean Slate Gray
     )
-    dm_embed.add_field(name="📋 Violation Reason", value=f"```\n{reason}\n```", inline=False)
-    dm_embed.add_field(name="🆔 Incident ID", value=f"`{warning_id}`", inline=True)
-    dm_embed.add_field(name="👮 Issued By", value=str(interaction.user), inline=True)
-    dm_embed.add_field(name="📈 Total Record", value=f"**{active_count}** active warning(s)", inline=True)
-    dm_embed.set_footer(text="Automated Compliance System")
+    dm_embed.add_field(name="📋 Reason", value=f"```text\n{reason}\n```", inline=False)
+    dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+    dm_embed.add_field(name="Issuer", value=str(interaction.user), inline=True)
+    dm_embed.add_field(name="Total Active", value=f"**{active_count}**", inline=True)
+    dm_embed.set_footer(text="Automated Compliance Engine")
     dm_embed.timestamp = datetime.datetime.utcnow()
     dm_sent = await dm_user(user, dm_embed)
 
     # Wide Widescreen Channel Panel
     embed = discord.Embed(
-        title="🛑 INFRACTION LOGGED",
-        description="A formal warning has been recorded against this user file. The details have been successfully synchronized with the central administration database.",
-        color=discord.Color.from_rgb(192, 41, 43)
+        title="🛑 User Log Added",
+        description="A formal infraction record has been generated and securely synchronized with the central administration database.",
+        color=discord.Color.from_rgb(44, 62, 80) # Clean Slate Gray
     )
     embed.set_thumbnail(url=user.display_avatar.url)
     
-    embed.add_field(name="👤 Target User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
-    embed.add_field(name="🆔 Warning Tracking ID", value=f"`{warning_id}`", inline=True)
-    embed.add_field(name="📊 Active Total", value=f"**{active_count}** infraction(s)", inline=True)
-    embed.add_field(name="📋 Formal Infraction Reason", value=f"```text\n{reason}\n```", inline=False)
-    embed.add_field(name="🛡️ Authorized Administrator", value=f"{interaction.user.mention}", inline=True)
-    embed.add_field(name="📥 Notification Status", value="✅ DM Dispatched" if dm_sent else "❌ User DMs Locked", inline=True)
+    embed.add_field(name="User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
+    embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+    embed.add_field(name="Status", value="🟢 **Active**", inline=True)
+    embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
+    embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="DM Delivery", value="✅ Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     
-    embed.set_footer(text=f"To remove this record, execute: /revokewarning {warning_id}")
+    embed.set_footer(text=f"To remove this case file, use: /revokewarning {warning_id}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
@@ -295,32 +295,32 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
                 timestamp[:10], "N/A", warning_id, timestamp, "TRUE", "FALSE", "", "Discord"])
 
     dm_embed = discord.Embed(
-        title="⚠️ FORMAL WARNING ISSUED",
-        description=f"An official warning has been registered for your account in **{interaction.guild.name}**.\nPlease review our server guidelines to avoid further disciplinary restrictions.",
-        color=discord.Color.from_rgb(230, 126, 34)
+        title="⚠️ User Moderation Notice",
+        description="An official warning has been registered for your account profile. Please review our community standards to maintain server compliance.",
+        color=discord.Color.from_rgb(44, 62, 80)
     )
-    dm_embed.add_field(name="📋 Violation Reason", value=f"```\n{reason}\n```", inline=False)
-    dm_embed.add_field(name="🆔 Incident ID", value=f"`{warning_id}`", inline=True)
-    dm_embed.add_field(name="👮 Issued By", value=str(interaction.user), inline=True)
-    dm_embed.set_footer(text="Automated Compliance System")
+    dm_embed.add_field(name="📋 Reason", value=f"```text\n{reason}\n```", inline=False)
+    dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+    dm_embed.add_field(name="Issuer", value=str(interaction.user), inline=True)
+    dm_embed.set_footer(text="Automated Compliance Engine")
     dm_embed.timestamp = datetime.datetime.utcnow()
     dm_sent = await dm_user(user, dm_embed)
 
     embed = discord.Embed(
-        title="🛑 INFRACTION LOGGED",
-        description="A formal warning has been recorded against this user file. The details have been successfully synchronized with the central administration database.",
-        color=discord.Color.from_rgb(192, 41, 43)
+        title="🛑 User Log Added",
+        description="A formal infraction record has been generated and securely synchronized with the central administration database.",
+        color=discord.Color.from_rgb(44, 62, 80)
     )
     embed.set_thumbnail(url=user.display_avatar.url)
     
-    embed.add_field(name="👤 Target User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
-    embed.add_field(name="🆔 Warning Tracking ID", value=f"`{warning_id}`", inline=True)
-    embed.add_field(name="📊 Active Total", value=f"**{active_count}** infraction(s)", inline=True)
-    embed.add_field(name="📋 Formal Infraction Reason", value=f"```text\n{reason}\n```", inline=False)
-    embed.add_field(name="🛡️ Authorized Administrator", value=f"{interaction.user.mention}", inline=True)
-    embed.add_field(name="📥 Notification Status", value="✅ DM Dispatched" if dm_sent else "❌ User DMs Locked", inline=True)
+    embed.add_field(name="User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
+    embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+    embed.add_field(name="Status", value="🟢 **Active**", inline=True)
+    embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
+    embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="DM Delivery", value="✅ Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     
-    embed.set_footer(text=f"To remove this record, execute: /revokewarning {warning_id}")
+    embed.set_footer(text=f"To remove this case file, use: /revokewarning {warning_id}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
@@ -334,10 +334,10 @@ async def revokewarning(interaction: discord.Interaction, warning_id: str):
 
     row, sheet_row = find_warning_by_id(warning_id)
     if row is None:
-        await interaction.followup.send(f"❌ No warning found with ID `{warning_id}`.")
+        await interaction.followup.send(f"❌ No case file found with ID `{warning_id}`.")
         return
     if row[COL_REVOKED].strip().upper() == "TRUE":
-        await interaction.followup.send(f"⚠️ Warning `{warning_id}` is already revoked.")
+        await interaction.followup.send(f"⚠️ Case file `{warning_id}` has already been removed.")
         return
 
     row[COL_ACTIVE]     = "FALSE"
@@ -347,22 +347,22 @@ async def revokewarning(interaction: discord.Interaction, warning_id: str):
 
     try:
         warned_user = await bot.fetch_user(int(row[COL_USER_ID]))
-        dm_embed = discord.Embed(title="✅ Warning Revoked",
-                                 description=f"A warning in **{interaction.guild.name}** has been removed.",
-                                 color=discord.Color.green())
-        dm_embed.add_field(name="Warning ID",      value=f"`{warning_id}`",     inline=True)
-        dm_embed.add_field(name="Original reason", value=row[COL_REASON],       inline=False)
-        dm_embed.add_field(name="Revoked by",      value=str(interaction.user), inline=True)
+        dm_embed = discord.Embed(title="✅ Record Updated",
+                                 description=f"A prior infraction file in **{interaction.guild.name}** has been removed.",
+                                 color=discord.Color.from_rgb(39, 174, 96)) # Deep Emerald Green
+        dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+        dm_embed.add_field(name="Original Reason", value=row[COL_REASON], inline=False)
         dm_embed.timestamp = datetime.datetime.utcnow()
         await warned_user.send(embed=dm_embed)
     except Exception:
         pass
 
-    embed = discord.Embed(title="✅ Warning Revoked", color=discord.Color.green())
-    embed.add_field(name="Warning ID",      value=f"`{warning_id}`",          inline=True)
-    embed.add_field(name="User",            value=f"<@{row[COL_USER_ID]}>",   inline=True)
-    embed.add_field(name="Original reason", value=row[COL_REASON],            inline=False)
-    embed.add_field(name="Revoked by",      value=interaction.user.mention,   inline=True)
+    embed = discord.Embed(title="✅ User Log Updated", color=discord.Color.from_rgb(39, 174, 96))
+    embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+    embed.add_field(name="User File", value=f"<@{row[COL_USER_ID]}>", inline=True)
+    embed.add_field(name="Status Update", value="⚪ **Removed / Revoked**", inline=True)
+    embed.add_field(name="Original Reason", value=row[COL_REASON], inline=False)
+    embed.add_field(name="Revoked By", value=interaction.user.mention, inline=True)
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
 
@@ -372,23 +372,39 @@ async def viewmywarnings(interaction: discord.Interaction):
     warnings = get_user_warnings(str(interaction.user.id))
 
     if not warnings:
-        await interaction.followup.send("✅ You have no warnings on record!", ephemeral=True)
+        embed = discord.Embed(
+            title="User Moderation History",
+            description="This menu is where you can view your past and current moderation history. Administrators can add incidents for any type of rule breaking.",
+            color=discord.Color.from_rgb(44, 62, 80)
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     active  = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
     revoked = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() == "TRUE"]
 
-    embed = discord.Embed(title="📋 Your Warnings",
-                          color=discord.Color.red() if active else discord.Color.green())
+    embed = discord.Embed(
+        title="User Moderation History",
+        description="This menu is where you can view your past and current moderation history. Administrators can add incidents for any type of rule breaking.",
+        color=discord.Color.from_rgb(44, 62, 80)
+    )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    if active:
-        lines = [f"**`{r[COL_INCIDENT_ID]}`** — {r[COL_REASON]} *(by {r[COL_ISSUED_BY]}, {r[COL_TIMESTAMP]})*" for r, _ in active]
-        embed.add_field(name=f"⚠️ Active ({len(active)})", value="\n".join(lines)[:1024], inline=False)
-    if revoked:
-        lines = [f"~~`{r[COL_INCIDENT_ID]}`~~ {r[COL_REASON]}" for r, _ in revoked]
-        embed.add_field(name=f"✅ Revoked ({len(revoked)})", value="\n".join(lines)[:1024], inline=False)
 
-    embed.set_footer(text=f"Total: {len(warnings)} | Active: {len(active)} | Revoked: {len(revoked)}")
+    if active:
+        block_text = ""
+        for r, _ in active:
+            block_text += f"▪️ ID: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]}\n  Reason: {r[COL_REASON]}\n  Date: {r[COL_TIMESTAMP][:10]} | Issuer: {r[COL_ISSUED_BY]}\n\n"
+        embed.add_field(name=f"🟢 Active Records ({len(active)})", value=f"```text\n{block_text.strip()}\n```", inline=False)
+        
+    if revoked:
+        block_text = ""
+        for r, _ in revoked:
+            block_text += f"▪️ ID: {r[COL_INCIDENT_ID]} | {r[COL_REASON]} (Revoked)\n"
+        embed.add_field(name=f"⚪ Historical Archive ({len(revoked)})", value=f"```text\n{block_text.strip()}\n```", inline=False)
+
+    embed.set_footer(text=f"Total Incidents Logged: {len(warnings)}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -402,23 +418,39 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     warnings = get_user_warnings(str(user.id))
 
     if not warnings:
-        await interaction.followup.send(f"✅ {user.mention} has no warnings.", ephemeral=True)
+        embed = discord.Embed(
+            title=f"User Log File — {user.display_name}",
+            description="This menu is where you can view all past and current moderation history. Moderators can add incidents for any type of rule breaking.",
+            color=discord.Color.from_rgb(44, 62, 80)
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
     active  = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
     revoked = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() == "TRUE"]
 
-    embed = discord.Embed(title=f"📋 Warnings for {user.display_name}",
-                          color=discord.Color.red() if active else discord.Color.green())
+    embed = discord.Embed(
+        title=f"User Log File — {user.display_name}",
+        description="This menu is where you can view all past and current moderation history. Moderators can add incidents for any type of rule breaking.",
+        color=discord.Color.from_rgb(44, 62, 80)
+    )
     embed.set_thumbnail(url=user.display_avatar.url)
-    if active:
-        lines = [f"**`{r[COL_INCIDENT_ID]}`** — {r[COL_REASON]} *(by {r[COL_ISSUED_BY]}, {r[COL_TIMESTAMP]})*" for r, _ in active]
-        embed.add_field(name=f"⚠️ Active ({len(active)})", value="\n".join(lines)[:1024], inline=False)
-    if revoked:
-        lines = [f"~~`{r[COL_INCIDENT_ID]}`~~ {r[COL_REASON]}" for r, _ in revoked]
-        embed.add_field(name=f"✅ Revoked ({len(revoked)})", value="\n".join(lines)[:1024], inline=False)
 
-    embed.set_footer(text=f"Total: {len(warnings)} | Active: {len(active)} | Revoked: {len(revoked)}")
+    if active:
+        block_text = ""
+        for r, _ in active:
+            block_text += f"▪️ Case: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]}\n  Reason: {r[COL_REASON]}\n  Date: {r[COL_TIMESTAMP][:10]} | Issuer: {r[COL_ISSUED_BY]}\n\n"
+        embed.add_field(name=f"🟢 Active Records ({len(active)})", value=f"```text\n{block_text.strip()}\n```", inline=False)
+        
+    if revoked:
+        block_text = ""
+        for r, _ in revoked:
+            block_text += f"▪️ Case: {r[COL_INCIDENT_ID]} | {r[COL_REASON]} (Revoked)\n"
+        embed.add_field(name=f"⚪ Historical Archive ({len(revoked)})", value=f"```text\n{block_text.strip()}\n```", inline=False)
+
+    embed.set_footer(text=f"Total Incidents Logged: {len(warnings)}")
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed, ephemeral=True)
 
