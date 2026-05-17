@@ -18,24 +18,27 @@ STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1420690312531017850
 STATIC_STATUS_ID  = 1505559844449419284  # Static message ID to edit in place
 
-SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:M"
-SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:M:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+# API endpoints scaled to 15 columns (A:O)
+SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
+SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
 
-# Column indices
-COL_USER_ID     = 0
-COL_USERNAME    = 1
-COL_ISSUED_BY   = 2
-COL_REASON      = 3
-COL_RESTRICTION = 4
-COL_START_DATE  = 5
-COL_END_DATE    = 6
-COL_INCIDENT_ID = 7
-COL_TIMESTAMP   = 8
-COL_ACTIVE      = 9
-COL_REVOKED     = 10
-COL_REVOKED_BY  = 11
-COL_SOURCE      = 12
+# Exact column indices matching your spreadsheet (A to O order)
+COL_USER_ID     = 0   # user_id
+COL_USERNAME    = 1   # username
+COL_ISSUED_BY   = 2   # warned_by
+COL_ISSUED_ID   = 3   # warned_by_id
+COL_REASON      = 4   # reason
+COL_TIMESTAMP   = 5   # timestamp
+COL_INCIDENT_ID = 6   # warning_id
+COL_REVOKED     = 7   # revoked (TRUE/FALSE)
+COL_REVOKED_BY  = 8   # revoked_by
+COL_REVOKED_AT  = 9   # revoked_at
+COL_SOURCE      = 10  # source
+COL_RESTRICTION = 11  # restriction
+COL_START_DATE  = 12  # start_date
+COL_END_DATE    = 13  # end_date
+COL_ALT_INC_ID  = 14  # incident_id (Column O fallback)
 
 # ── Google Service Account Authentication ─────────────────────────────────────
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -59,7 +62,7 @@ def sheets_headers():
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 # ── Sheets helpers ─────────────────────────────────────────────────────────────
-def pad(row, length=13):
+def pad(row, length=15):
     return list(row) + [""] * (length - len(row))
 
 def read_all_rows():
@@ -81,7 +84,7 @@ def append_row(row):
 
 def update_row(row_index, row):
     try:
-        range_str = f"{SHEET_NAME}!A{row_index}:M{row_index}"
+        range_str = f"{SHEET_NAME}!A{row_index}:O{row_index}"
         url = f"{SHEET_UPDATE_BASE}{range_str}?valueInputOption=RAW"
         resp = requests.put(url, headers=sheets_headers(), json={"values": [row]}, timeout=10)
         if resp.status_code != 200:
@@ -230,8 +233,17 @@ async def update_status_embed():
 
 # ── Commands ───────────────────────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
-@app_commands.describe(user="The user to warn", reason="Reason for the warning")
-async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+@app_commands.describe(
+    user="The user to warn", 
+    reason="Reason for the warning",
+    source="Where did the infraction happen?",
+    end_date="Optional expiry date (e.g., 2026-12-31). Leave blank for permanent."
+)
+@app_commands.choices(source=[
+    app_commands.Choice(name="Discord Server", value="Discord"),
+    app_commands.Choice(name="Roblox In-Game", value="Roblox Game")
+])
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction):
         await interaction.response.send_message("❌ You need **Moderate Members** or higher.", ephemeral=True)
         return
@@ -239,31 +251,53 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
 
     warning_id   = str(uuid.uuid4())[:8].upper()
     timestamp    = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    start_date   = timestamp[:10]
+    final_expiry = end_date if end_date else "Never"
+    final_source = source.value if source else "Discord"
+
     all_warnings = get_user_warnings(str(user.id))
     active_count = sum(1 for r, _ in all_warnings if pad(r)[COL_REVOKED].upper() != "TRUE") + 1
 
-    append_row([str(user.id), str(user), str(interaction.user), reason, "Warning",
-                timestamp[:10], "N/A", warning_id, timestamp, "TRUE", "FALSE", "", "Discord"])
+    # Appends exactly into your 15-column schema (A to O layout)
+    append_row([
+        str(user.id),          # A: user_id
+        str(user),             # B: username
+        str(interaction.user), # C: warned_by
+        str(interaction.user.id), # D: warned_by_id
+        reason,                # E: reason
+        timestamp,             # F: timestamp
+        warning_id,            # G: warning_id
+        "FALSE",               # H: revoked (Starts as false)
+        "",                    # I: revoked_by
+        "",                    # J: revoked_at
+        final_source,          # K: source
+        "Warning",             # L: restriction (Forced to Warning)
+        start_date,            # M: start_date
+        final_expiry,          # N: end_date
+        warning_id             # O: incident_id fallback
+    ])
 
-    # Wide-set clean corporate DM panel
+    # Clean UI DM panel
     dm_embed = discord.Embed(
         title="⚠️ User Moderation Notice",
         description="An official warning has been registered for your account profile. Please review our community standards to maintain server compliance.",
-        color=discord.Color.from_rgb(44, 62, 80) # Clean Slate Gray
+        color=discord.Color.from_rgb(44, 62, 80)
     )
     dm_embed.add_field(name="📋 Reason", value=f"```text\n{reason}\n```", inline=False)
     dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     dm_embed.add_field(name="Issuer", value=str(interaction.user), inline=True)
+    dm_embed.add_field(name="Platform", value=final_source, inline=True)
+    dm_embed.add_field(name="Expires", value=final_expiry, inline=True)
     dm_embed.add_field(name="Total Active", value=f"**{active_count}**", inline=True)
     dm_embed.set_footer(text="Automated Compliance Engine")
     dm_embed.timestamp = datetime.datetime.utcnow()
     dm_sent = await dm_user(user, dm_embed)
 
-    # Wide Widescreen Channel Panel
+    # Wide Channel Log Embed Panel
     embed = discord.Embed(
         title="🛑 User Log Added",
         description="A formal infraction record has been generated and securely synchronized with the central administration database.",
-        color=discord.Color.from_rgb(44, 62, 80) # Clean Slate Gray
+        color=discord.Color.from_rgb(44, 62, 80)
     )
     embed.set_thumbnail(url=user.display_avatar.url)
     
@@ -271,6 +305,8 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
     embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     embed.add_field(name="Status", value="🟢 **Active**", inline=True)
     embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
+    embed.add_field(name="Source", value=final_source, inline=True)
+    embed.add_field(name="Expiry Date", value=final_expiry, inline=True)
     embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="DM Delivery", value="✅ Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     
@@ -279,8 +315,17 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="issuewarning", description="[Admin] Issue a warning to a user")
-@app_commands.describe(user="The user to warn", reason="Reason for the warning")
-async def issuewarning(interaction: discord.Interaction, user: discord.Member, reason: str):
+@app_commands.describe(
+    user="The user to warn", 
+    reason="Reason for the warning",
+    source="Where did the infraction happen?",
+    end_date="Optional expiry date (e.g., 2026-12-31). Leave blank for permanent."
+)
+@app_commands.choices(source=[
+    app_commands.Choice(name="Discord Server", value="Discord"),
+    app_commands.Choice(name="Roblox In-Game", value="Roblox Game")
+])
+async def issuewarning(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True)
         return
@@ -288,27 +333,34 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
 
     warning_id   = str(uuid.uuid4())[:8].upper()
     timestamp    = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    start_date   = timestamp[:10]
+    final_expiry = end_date if end_date else "Never"
+    final_source = source.value if source else "Discord"
+
     all_warnings = get_user_warnings(str(user.id))
     active_count = sum(1 for r, _ in all_warnings if pad(r)[COL_REVOKED].upper() != "TRUE") + 1
 
-    append_row([str(user.id), str(user), str(interaction.user), reason, "Warning",
-                timestamp[:10], "N/A", warning_id, timestamp, "TRUE", "FALSE", "", "Discord"])
+    append_row([
+        str(user.id), str(user), str(interaction.user), str(interaction.user.id),
+        reason, timestamp, warning_id, "FALSE", "", "", final_source, "Warning", start_date, final_expiry, warning_id
+    ])
 
     dm_embed = discord.Embed(
         title="⚠️ User Moderation Notice",
-        description="An official warning has been registered for your account profile. Please review our community standards to maintain server compliance.",
+        description="An official warning has been registered for your account profile. Please review our community standards.",
         color=discord.Color.from_rgb(44, 62, 80)
     )
     dm_embed.add_field(name="📋 Reason", value=f"```text\n{reason}\n```", inline=False)
     dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
-    dm_embed.add_field(name="Issuer", value=str(interaction.user), inline=True)
+    dm_embed.add_field(name="Platform", value=final_source, inline=True)
+    dm_embed.add_field(name="Expires", value=final_expiry, inline=True)
     dm_embed.set_footer(text="Automated Compliance Engine")
     dm_embed.timestamp = datetime.datetime.utcnow()
     dm_sent = await dm_user(user, dm_embed)
 
     embed = discord.Embed(
         title="🛑 User Log Added",
-        description="A formal infraction record has been generated and securely synchronized with the central administration database.",
+        description="A formal infraction record has been generated and securely synchronized with the central database.",
         color=discord.Color.from_rgb(44, 62, 80)
     )
     embed.set_thumbnail(url=user.display_avatar.url)
@@ -317,6 +369,8 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
     embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     embed.add_field(name="Status", value="🟢 **Active**", inline=True)
     embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
+    embed.add_field(name="Source", value=final_source, inline=True)
+    embed.add_field(name="Expiry Date", value=final_expiry, inline=True)
     embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="DM Delivery", value="✅ Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     
@@ -340,16 +394,17 @@ async def revokewarning(interaction: discord.Interaction, warning_id: str):
         await interaction.followup.send(f"⚠️ Case file `{warning_id}` has already been removed.")
         return
 
-    row[COL_ACTIVE]     = "FALSE"
+    # Updates your tracking status flags cleanly
     row[COL_REVOKED]    = "TRUE"
     row[COL_REVOKED_BY] = str(interaction.user)
+    row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     update_row(sheet_row, row)
 
     try:
         warned_user = await bot.fetch_user(int(row[COL_USER_ID]))
         dm_embed = discord.Embed(title="✅ Record Updated",
                                  description=f"A prior infraction file in **{interaction.guild.name}** has been removed.",
-                                 color=discord.Color.from_rgb(39, 174, 96)) # Deep Emerald Green
+                                 color=discord.Color.from_rgb(39, 174, 96))
         dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
         dm_embed.add_field(name="Original Reason", value=row[COL_REASON], inline=False)
         dm_embed.timestamp = datetime.datetime.utcnow()
@@ -395,7 +450,7 @@ async def viewmywarnings(interaction: discord.Interaction):
     if active:
         block_text = ""
         for r, _ in active:
-            block_text += f"▪️ ID: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]}\n  Reason: {r[COL_REASON]}\n  Date: {r[COL_TIMESTAMP][:10]} | Issuer: {r[COL_ISSUED_BY]}\n\n"
+            block_text += f"▪️ ID: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Source: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
         embed.add_field(name=f"🟢 Active Records ({len(active)})", value=f"```text\n{block_text.strip()}\n```", inline=False)
         
     if revoked:
@@ -441,7 +496,7 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     if active:
         block_text = ""
         for r, _ in active:
-            block_text += f"▪️ Case: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]}\n  Reason: {r[COL_REASON]}\n  Date: {r[COL_TIMESTAMP][:10]} | Issuer: {r[COL_ISSUED_BY]}\n\n"
+            block_text += f"▪️ Case: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Source: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
         embed.add_field(name=f"🟢 Active Records ({len(active)})", value=f"```text\n{block_text.strip()}\n```", inline=False)
         
     if revoked:
