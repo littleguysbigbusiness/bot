@@ -403,7 +403,6 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ── Run ────────────────────────────────────────────────────────────────────────
-
 # ── Run Web Server Framework & Bot ─────────────────────────────────────────────
 from flask import Flask
 import threading
@@ -414,20 +413,14 @@ app = Flask(__name__)
 def home():
     return "BWR7 Warnings Bot is Online!", 200
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
+def run_discord_bot():
     if not DISCORD_TOKEN:
         print("❌ ERROR: DISCORD_BOT_TOKEN is not set")
-        exit(1)
-        
-    # Start the web server in a separate background thread to keep Render happy
-    print("🛰️ Starting web server thread...")
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-    
-    # Start the actual Discord Bot
-    print("🤖 Starting Discord Bot...")
+        return
+    print("🤖 Starting Discord Bot inside background thread...")
     bot.run(DISCORD_TOKEN)
+
+# This triggers the moment Gunicorn loads the 'app' object
+print("🛰️ Initializing background threads...")
+discord_thread = threading.Thread(target=run_discord_bot, daemon=True)
+discord_thread.start()
