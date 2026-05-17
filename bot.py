@@ -404,11 +404,30 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 
+# ── Run Web Server Framework & Bot ─────────────────────────────────────────────
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "BWR7 Warnings Bot is Online!", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        print("❌ ERROR: DISCORD_BOT_TOKEN is not set in .env")
+        print("❌ ERROR: DISCORD_BOT_TOKEN is not set")
         exit(1)
-    if not SHEETS_TOKEN:
-        print("❌ ERROR: GOOGLESHEETS_ACCESS_TOKEN is not set in .env")
-        exit(1)
+        
+    # Start the web server in a separate background thread to keep Render happy
+    print("🛰️ Starting web server thread...")
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    
+    # Start the actual Discord Bot
+    print("🤖 Starting Discord Bot...")
     bot.run(DISCORD_TOKEN)
