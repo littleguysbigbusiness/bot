@@ -337,7 +337,7 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
 
     return "Database trail flagged"
 
-# ── Universal Action Master Engine (With External Form Appeal Logic) ───────────
+# ── Universal Action Master Engine (Dispatches DM Before API Ban Execution) ────
 async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, end_date: str):
     warning_id = str(uuid.uuid4())[:8].upper()
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -347,6 +347,33 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     all_warnings = get_user_warnings(str(user.id))
     active_count = sum(1 for r, _ in all_warnings if pad(r)[COL_REVOKED].upper() != "TRUE") + 1
 
+    # 1. GENERATE THE CONTEXT EMBED CARD SYSTEM
+    dm_embed = discord.Embed(
+        title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", 
+        description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", 
+        color=discord.Color.from_rgb(44, 62, 80)
+    )
+    dm_embed.add_field(name="📋 Infraction Type", value=restriction_type, inline=True)
+    dm_embed.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
+    dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
+    dm_embed.add_field(name="Platform context", value=source, inline=True)
+    dm_embed.add_field(name="Expiration Date", value=final_expiry, inline=True)
+    
+    form_instructions = (
+        "If you are banned or restricted from server channels and cannot submit an in-app `/appeal`, "
+        f"you may lodge an external case evaluation request via our primary appeal form:\n"
+        f"📋 **[Click Here to Open Google Appeal Form]({GOOGLE_APPEAL_FORM_URL})**\n\n"
+        "To review bot deployment status or invite properties externally, use this link:\n"
+        f"🛰️ **[Busways Assistance Application Invite Gateway]({BOT_INVITE_URL})**"
+    )
+    dm_embed.add_field(name="⚖️ External Appeal Request Notice", value=form_instructions, inline=False)
+    dm_embed.set_footer(text="Automated Compliance Engine • Busways Administration")
+    dm_embed.timestamp = datetime.datetime.utcnow()
+
+    # 2. DISPATCH THE USER NOTICE IMMEDIATELY BEFORE EXECUTION PIPELINE
+    dm_sent = await dm_user(user, dm_embed)
+
+    # 3. RUN LIVE API PENALTY OPERATIONS
     execution_notes = "Logged to Database"
     
     if source == "Discord":
@@ -369,40 +396,16 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
 
         elif restriction_type == "Ban":
             try:
+                # Ban triggers seamlessly right here after notice delivery has successfully completed
                 await user.ban(delete_message_days=1, reason=reason)
                 execution_notes = "Banned cleanly from guild instance"
             except Exception as e: execution_notes = f"Logged (API Ban execution failed: {e})"
 
+    # 4. LOG ENTRY TRANSACTION TO SPREADSHEET ROW BACKUP
     append_row([
         str(user.id), str(user), str(interaction.user), str(interaction.user.id),
         reason, timestamp, warning_id, "FALSE", "", "", source, restriction_type, start_date, final_expiry, warning_id
     ])
-
-    # 📥 User DM Notice Embed Block
-    dm_embed = discord.Embed(
-        title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", 
-        description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", 
-        color=discord.Color.from_rgb(44, 62, 80)
-    )
-    dm_embed.add_field(name="📋 Infraction Type", value=restriction_type, inline=True)
-    dm_embed.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
-    dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
-    dm_embed.add_field(name="Platform context", value=source, inline=True)
-    dm_embed.add_field(name="Expiration Date", value=final_expiry, inline=True)
-    
-    # Dual hyperlinked exit routes for users (Google Form Appeal + Permanent Re-invite Link layout)
-    form_instructions = (
-        "If you are banned or restricted from server channels and cannot submit an in-app `/appeal`, "
-        f"you may lodge an external case evaluation request via our primary appeal form:\n"
-        f"📋 **[Click Here to Open Google Appeal Form]({GOOGLE_APPEAL_FORM_URL})**\n\n"
-        "To review bot deployment status or invite properties externally, use this link:\n"
-        f"🛰️ **[Busways Assistance Application Invite Gateway]({BOT_INVITE_URL})**"
-    )
-    dm_embed.add_field(name="⚖️ External Appeal Request Notice", value=form_instructions, inline=False)
-    
-    dm_embed.set_footer(text="Automated Compliance Engine • Busways Administration")
-    dm_embed.timestamp = datetime.datetime.utcnow()
-    dm_sent = await dm_user(user, dm_embed)
 
     embed = discord.Embed(title=f"🛑 User Log Added ({restriction_type})", description=f"A formal {restriction_type.lower()} record has been generated and securely logged to the central database.", color=discord.Color.from_rgb(44, 62, 80))
     embed.set_thumbnail(url=user.display_avatar.url)
@@ -413,7 +416,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     embed.add_field(name="API Execution", value=f"`{execution_notes}`", inline=True)
     embed.add_field(name="Expiry Date", value=final_expiry, inline=True)
     embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
-    embed.add_field(name="DM Delivery", value="✅ Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
+    embed.add_field(name="DM Delivery", value="✅ Pre-Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     embed.set_footer(text=f"To undo this record file, execute: /revokeaction {warning_id}")
     embed.timestamp = datetime.datetime.utcnow()
     
