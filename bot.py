@@ -330,6 +330,9 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     start_date = timestamp[:10]
 
+    # 🚀 AUTOMATION HACK: Grabs their Nickname (Roblox Name) instead of raw Discord tag strings!
+    roblox_username = user.nick if user.nick else user.display_name
+
     dm_embed = discord.Embed(title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", color=discord.Color.from_rgb(44, 62, 80))
     dm_embed.add_field(name="📋 Infraction Type", value=restriction_type, inline=True)
     dm_embed.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
@@ -358,14 +361,14 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
             except Exception as e: execution_notes = f"Logged (API Ban execution failed: {e})"
 
     append_row([
-        str(user.id), str(user), str(interaction.user), str(interaction.user.id),
+        str(user.id), roblox_username, str(interaction.user), str(interaction.user.id),
         reason, timestamp, warning_id, "FALSE", "", "", source, restriction_type, start_date, final_expiry, warning_id,
         backup_roles_str  
     ])
 
     embed = discord.Embed(title=f"🛑 User Log Added ({restriction_type})", description=f"A formal {restriction_type.lower()} record has been generated and securely logged to the central database.", color=discord.Color.from_rgb(44, 62, 80))
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="User", value=f"{user.mention}\n`ID: {user.id}`", inline=True)
+    embed.add_field(name="User Profile", value=f"{user.mention}\n`Roblox: {roblox_username}`\n`ID: {user.id}`", inline=True)
     embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     embed.add_field(name="Type", value=f"**{restriction_type}**", inline=True)
     embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
@@ -518,7 +521,7 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     embed = compile_split_warnings_embed(embed, warnings)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ── Moderation Commands (Forced Source Values) ──────────────────────────────────
+# ── Moderation Commands (Automated Discord Sourcing) ───────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", end_date="Optional expiry date (YYYY-MM-DD)")
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str = None):
