@@ -21,7 +21,7 @@ STATIC_STATUS_ID  = 1505559844449419284
 APPEAL_CHANNEL_ID = 1420690312531017850  
 
 # Your official application link assets
-GOOGLE_APPEAL_FORM_URL = "https://forms.google.com" 
+GOOGLE_APPEAL_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLScOXFE24Bz7jGiNT4kn02FLiADibivHIxREyXGY2rvQxACG-A/viewform?usp=dialog" 
 
 # Scale endpoints to 16 columns (A:P) to include the role database column
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:P"
@@ -60,7 +60,7 @@ PROTECTED_ROLE_NAMES = [
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 creds = None
 
-# Dynamic routing check updates to search Render's system secret directory mount path first!
+# Searches Render's secret mount path layout config first
 SECRET_FILE_PATH = "/etc/secrets/service_account.json"
 ALTERNATIVE_PATH = "service_account.json"
 
