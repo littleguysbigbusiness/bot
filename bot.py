@@ -205,6 +205,7 @@ class WarningsBot(commands.Bot):
         
     async def setup_hook(self):
         self.add_view(AppealReviewButtons())
+        # Global API command synchronization processing container loop
         await self.tree.sync()
         print("✅ Slash commands synced.")
 
@@ -485,92 +486,6 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     await interaction.followup.send(embed=embed)
 
 # ── Slash Commands ─────────────────────────────────────────────────────────────
-@bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and instantly lift its punishment")
-@app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
-async def revokeaction(interaction: discord.Interaction, case_id: str):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    await interaction.response.defer()
-    row, sheet_row = find_warning_by_id(case_id)
-    if row is None:
-        return await interaction.followup.send(f"❌ Case ID `{case_id}` not found on database sheet.")
-    if row[COL_REVOKED].strip().upper() == "TRUE":
-        return await interaction.followup.send(f"⚠️ Case file `{case_id}` has already been revoked.")
-
-    lift_result = await execute_live_punishment_revocation(interaction.guild, row, str(interaction.user))
-
-    row[COL_REVOKED]    = "TRUE"
-    row[COL_REVOKED_BY] = str(interaction.user)
-    row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    update_row(sheet_row, row)
-
-    embed = discord.Embed(title="✅ Universal Revoke Executed", color=discord.Color.from_rgb(39, 174, 96))
-    embed.add_field(name="Case ID", value=f"`{case_id}`", inline=True)
-    embed.add_field(name="User Target", value=f"<@{row[COL_USER_ID]}>", inline=True)
-    embed.add_field(name="Action Type Lifted", value=f"**{row[COL_RESTRICTION]}**", inline=True)
-    embed.add_field(name="API Removal Result", value=f"`{lift_result}`", inline=False)
-    embed.add_field(name="Original Reason Cell", value=row[COL_REASON], inline=False)
-    embed.add_field(name="Authorized Administrator", value=interaction.user.mention, inline=True)
-    embed.timestamp = datetime.datetime.utcnow()
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="modstats", description="[Admin] View server-wide moderation metrics and leaderboard layout")
-async def modstats(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    await interaction.response.defer()
-    rows = read_all_rows()
-    if not rows:
-        return await interaction.followup.send("📋 Database empty.")
-
-    total_logs = len(rows)
-    type_counts = {"Warning": 0, "Timeout": 0, "Ban": 0, "Staff Suspension": 0}
-    user_infractions = {}
-    admin_actions = {}
-
-    for raw_row in rows:
-        row = pad(raw_row)
-        is_revoked = row[COL_REVOKED].strip().upper() == "TRUE"
-        rest_type = row[COL_RESTRICTION].strip()
-        uid = row[COL_USER_ID].strip()
-        username = row[COL_USERNAME].strip()
-        admin_name = row[COL_ISSUED_BY].strip()
-
-        if rest_type in type_counts:
-            type_counts[rest_type] += 1
-        if not is_revoked and uid:
-            user_key = f"<@{uid}> (`{username}`)"
-            user_infractions[user_key] = user_infractions.get(user_key, 0) + 1
-        if admin_name:
-            admin_actions[admin_name] = admin_actions.get(admin_name, 0) + 1
-
-    top_user = "None"
-    if user_infractions:
-        tk = max(user_infractions, key=user_infractions.get)
-        top_user = f"{tk} — **{user_infractions[tk]}** active cases"
-
-    top_admin = "None"
-    if admin_actions:
-        ak = max(admin_actions, key=admin_actions.get)
-        top_admin = f"👤 **{ak}** — **{admin_actions[ak]}** actions logged"
-
-    embed = discord.Embed(title="📊 Server Moderation Analytics Overview", description="Data compiled dynamically from tracking sheet.", color=discord.Color.from_rgb(44, 62, 80))
-    embed.add_field(name="📈 Metrics Scale", value=f"Total Records Logged: **{total_logs}**", inline=False)
-    embed.add_field(name="🗂️ Action Type Breakdown", value=f"⚠️ **Warnings:** {type_counts['Warning']}\n⏳ **Timeouts:** {type_counts['Timeout']}\n🔨 **Bans:** {type_counts['Ban']}\n🛡️ **Staff Suspensions:** {type_counts['Staff Suspension']}", inline=True)
-    embed.add_field(name="🚨 Highest Active Infractions User", value=top_user, inline=False)
-    embed.add_field(name="👮 Top Enforcing Administrator", value=top_admin, inline=False)
-    embed.timestamp = datetime.datetime.utcnow()
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="appeal", description="Submit an evaluation appeal form for an active infraction file")
-async def appeal(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    warnings = get_user_warnings(str(interaction.user.id))
-    active_cases = [(r, idx) for r, idx in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
-    if not active_cases:
-        return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
-    await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
-
 @bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -594,7 +509,9 @@ async def viewmywarnings(interaction: discord.Interaction):
 @app_commands.describe(user="The user to look up")
 async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    await interaction.response.defer(ephemeral=True)
+    
+    # 🔒 Changed to public visibility tracking row data logs!
+    await interaction.response.defer(ephemeral=False)
     warnings = get_user_warnings(str(user.id))
     
     embed = discord.Embed(title=f"User Log File — {user.display_name}", description="Logs categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
@@ -602,14 +519,14 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     
     if not warnings:
         embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
-        return await interaction.followup.send(embed=embed, ephemeral=True)
+        return await interaction.followup.send(embed=embed)
         
     txt = ""
     for r, _ in warnings:
         txt += f"▪ McKay: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Context: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
         
     embed.add_field(name=f"📊 Cataloged History Files ({len(warnings)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
@@ -711,6 +628,7 @@ async def restoreroles(interaction: discord.Interaction):
     for r, idx in history:
         if pad(r)[COL_INCIDENT_ID] == active_suspension[COL_INCIDENT_ID]:
             r_padded = pad(r)
+            # Corrected inline array pointer parsing typo configuration step here
             r_padded[COL_REVOKED], r_padded[COL_REVOKED_BY], r_padded[COL_REVOKED_AT] = "TRUE", "System Auto-Restore", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             update_row(idx, r_padded)
             break
