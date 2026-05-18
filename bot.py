@@ -16,8 +16,8 @@ DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
-STATUS_CHANNEL_ID = 1420690312531017850
-STATIC_STATUS_ID  = 1505559844449419284
+STATUS_CHANNEL_ID = 1476812926521184276  # Your new targeted status text channel
+STATIC_STATUS_ID  = 1505559844449419284  # Temporary placeholder (will auto-generate new one if not found)
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
@@ -76,7 +76,7 @@ def read_all_rows():
 
 def append_row(row):
     try:
-        resp = requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
     except Exception as e:
         print(f"[Sheets] Append error: {e}")
 
@@ -181,19 +181,34 @@ async def dm_user(user, embed):
     except discord.Forbidden:
         return False
 
+# ── Status Loop (Adaptive Edit/Post Engine) ───────────────────────────────────
 @tasks.loop(seconds=60)
 async def update_status_embed():
     try:
         channel = bot.get_channel(STATUS_CHANNEL_ID)
-        if not channel: return
+        if not channel: 
+            print(f"[Status] Channel targeting failed for ID: {STATUS_CHANNEL_ID}")
+            return
+            
         resp = requests.get(STATUS_PAGE_URL, timeout=10)
-        if resp.status_code == 200:
-            embed = build_status_embed(resp.json())
-            try:
-                msg = await channel.fetch_message(STATIC_STATUS_ID)
-                await msg.edit(embed=embed)
-            except Exception: pass
-    except Exception: pass
+        if resp.status_code != 200: return
+        
+        embed = build_status_embed(resp.json())
+
+        # Attempt to edit your designated message ID configuration
+        try:
+            msg = await channel.fetch_message(STATIC_STATUS_ID)
+            await msg.edit(embed=embed)
+            print(f"[Status] Successfully edited active card {STATIC_STATUS_ID}")
+            return
+        except Exception:
+            # If the specific ID isn't found in this channel, post a brand new one from scratch!
+            print(f"⚠️ Message ID {STATIC_STATUS_ID} not found in this channel layout. Posting fresh status card...")
+            new_msg = await channel.send(embed=embed)
+            print(f"📡 FRESH EMED GENERATED! Target Message ID: {new_msg.id} — Copy this ID into your script settings configuration once fetched!")
+            
+    except Exception as e: 
+        print(f"[Status Engine] Fault encountered: {e}")
 
 # ── Universal Action Master Function ───────────────────────────────────────────
 async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, end_date: str):
@@ -275,18 +290,15 @@ async def staff_suspension(interaction: discord.Interaction, user: discord.Membe
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
 
-    # Verify date is formatted properly
     try:
         datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
     except ValueError:
         await interaction.followup.send("❌ **Error:** You must specify a valid expiry date matching `YYYY-MM-DD` formatting for staff suspensions.")
         return
 
-    # Backup roles that can be modified (excluding @everyone)
     role_ids = [r.id for r in user.roles if r.name != "@everyone" and not r.managed]
     save_suspended_roles(user.id, role_ids)
 
-    # Process stripping enforcement
     for role in user.roles:
         if role.name != "@everyone" and not role.managed:
             try: await user.remove_roles(role)
@@ -307,7 +319,6 @@ async def restoreroles(interaction: discord.Interaction):
         await interaction.followup.send("❌ You do not have any active **Staff Suspension** logs registered.", ephemeral=True)
         return
 
-    # Evaluate expiration
     active_suspension = pad(suspensions[-1])
     expiry_str = active_suspension[COL_END_DATE].strip()
 
@@ -327,7 +338,6 @@ async def restoreroles(interaction: discord.Interaction):
         await interaction.followup.send("❌ The expiry date in the sheet database is corrupted. Contact an Administrator.", ephemeral=True)
         return
 
-    # Process Role Restoration
     saved_ids = pop_suspended_roles(user_id)
     if not saved_ids:
         await interaction.followup.send("⚠️ No original role backups found in local server storage. Staff members must re-assign them manually.", ephemeral=True)
@@ -343,7 +353,6 @@ async def restoreroles(interaction: discord.Interaction):
                 restored_count += 1
             except Exception: pass
 
-    # Revoke suspension in database row file
     for r, idx in history:
         if pad(r)[COL_INCIDENT_ID] == active_suspension[COL_INCIDENT_ID]:
             r_padded = pad(r)
