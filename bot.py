@@ -21,7 +21,7 @@ STATIC_STATUS_ID  = 1505559844449419284
 APPEAL_CHANNEL_ID = 1420690312531017850  
 
 # Your official application link assets
-GOOGLE_APPEAL_FORM_URL = "https://forms.google.com" # <-- Swap with your actual Google Form link later!
+GOOGLE_APPEAL_FORM_URL = "https://forms.gle/cKRQXxpHKYgV8GZ37" # <-- Swap with your actual Google Form link later!
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
