@@ -61,9 +61,15 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 creds = None
 
 if os.path.exists("service_account.json"):
-    creds = service_account.Credentials.from_service_account_file(
-        "service_account.json", scopes=SCOPES
-    )
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            "service_account.json", scopes=SCOPES
+        )
+        print("✅ Google API service account credentials verified cleanly.")
+    except Exception as e:
+        print(f"❌ Google API initialization exception: {e}")
+else:
+    print("⚠️ WARNING: 'service_account.json' missing from repository folder path root!")
 
 def sheets_headers():
     global creds
@@ -468,7 +474,7 @@ def compile_split_warnings_embed(embed, warnings):
         is_revoked = padded[COL_REVOKED].strip().upper() == "TRUE"
         src = padded[COL_SOURCE].strip().lower()
         
-        case_text = f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION]}\n  Reason: {padded[COL_REASON]}\n  Issued: {padded[COL_TIMESTAMP][:10]} | Expires: {padded[COL_END_DATE]}\n\n"
+        case_text = f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[padded[COL_RESTRICTION]] if COL_RESTRICTION < len(padded) else 'Warning'}\n  Reason: {padded[COL_REASON]}\n  Issued: {padded[COL_TIMESTAMP][:10]} | Expires: {padded[COL_END_DATE]}\n\n"
         
         if is_revoked:
             revoked_list.append(f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION]} (Revoked)\n")
@@ -618,7 +624,9 @@ def roblox_violation_inbound():
 app = Flask(__name__)
 def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 def run_discord_bot():
-    if not DISCORD_TOKEN: return
+    if not DISCORD_TOKEN: 
+        print("❌ CRITICAL: 'DISCORD_BOT_TOKEN' environment variable is blank or missing inside Render settings!")
+        return
     bot.run(DISCORD_TOKEN)
 
 print("🛰️ Initializing multi-threaded background pipelines...")
