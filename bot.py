@@ -19,7 +19,7 @@ STATIC_STATUS_ID  = 1505559844449419284
 APPEAL_CHANNEL_ID = 1420690312531017850  
 
 # Your official application link assets
-GOOGLE_APPEAL_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLScOXFE24Bz7jGiNT4kn02FLiADibivHIxREyXGY2rvQxACG-A/viewform?usp=dialog"
+GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
@@ -570,6 +570,46 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases:
         return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
+
+@bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
+async def viewmywarnings(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    warnings = get_user_warnings(str(interaction.user.id))
+    
+    embed = discord.Embed(title="User Moderation History", description="Your logs are categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    
+    if not warnings:
+        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
+        return await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    txt = ""
+    for r, _ in warnings:
+        txt += f"▪ McKay: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Context: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
+        
+    embed.add_field(name=f"📊 Your Cataloged History Files ({len(warnings)})", value=f"```text\n{txt.strip()}\n```", inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user split by platform")
+@app_commands.describe(user="The user to look up")
+async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
+    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    warnings = get_user_warnings(str(user.id))
+    
+    embed = discord.Embed(title=f"User Log File — {user.display_name}", description="Logs categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
+    embed.set_thumbnail(url=user.display_avatar.url)
+    
+    if not warnings:
+        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
+        return await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    txt = ""
+    for r, _ in warnings:
+        txt += f"▪ McKay: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Context: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
+        
+    embed.add_field(name=f"📊 Cataloged History Files ({len(warnings)})", value=f"```text\n{txt.strip()}\n```", inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
