@@ -46,7 +46,7 @@ COL_END_DATE    = 13
 COL_ALT_INC_ID  = 14
 COL_BACKUP_ROLES = 15  # Column P: Stores comma-separated staff role IDs
 
-# Explicitly blacklisted role names that the system will NEVER restore automatically
+# Explicitly protected role names: IMMUNE to being stripped and BLOCKED from auto-restoration
 PROTECTED_ROLE_NAMES = [
     "Rythm", "TTS Bot", "GiveawayBot", "Appy", "Application Blacklist...", "Busways OGS",
     "Near/Lived/Lives/R7", "He’s A Great Guy I Th...", "Service Pings", "astras Playhouse Key",
@@ -313,9 +313,7 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
                 for r_id in role_ids:
                     role = guild.get_role(r_id)
                     if role:
-                        # 🔒 Double Check: Ensure role name is NOT inside our protected list layout configuration
                         if role.name.strip() in PROTECTED_ROLE_NAMES:
-                            print(f"[Security] Skipped restoration of protected role: {role.name}")
                             continue
                         try: 
                             await member.add_roles(role)
@@ -505,6 +503,7 @@ async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason
     expiry = end_date if end_date else "Never"
     await run_moderation_action(interaction, user, reason, "Ban", source.value if source else "Discord", expiry)
 
+# ── Upgraded Staff Suspension Command (Bypasses Protected Role Stripping) ──────
 @bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and save role backups directly to Google Sheet")
 @app_commands.describe(user="The staff member", reason="Reason for suspension", source="Platform context", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
@@ -514,19 +513,23 @@ async def staff_suspension(interaction: discord.Interaction, user: discord.Membe
     try: datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
     except ValueError: return await interaction.followup.send("❌ **Error:** Expiry date format required: `YYYY-MM-DD`")
 
-    # Capture all existing eligible role IDs and join them with commas
+    # Capture all existing eligible role IDs for spreadsheet backup mapping
     role_ids = [str(r.id) for r in user.roles if r.name != "@everyone" and not r.managed]
     backup_roles_str = ",".join(role_ids)
 
-    # Strip roles natively from the user profile
+    # Strip roles natively from user profile, completely ignoring protected roles!
     for role in user.roles:
         if role.name != "@everyone" and not role.managed:
+            # 🔒 Immunity Filter: If the role is on your list, skip it entirely!
+            if role.name.strip() in PROTECTED_ROLE_NAMES:
+                print(f"[Immunity] Skipped stripping protected role during suspension: {role.name}")
+                continue
             try: await user.remove_roles(role)
             except Exception: pass
             
     await run_moderation_action(interaction, user, reason, "Staff Suspension", source.value if source else "Discord", end_date, backup_roles_str=backup_roles_str)
 
-# ── Role Restoration Logic (Cross-Checks Your New Safety Blacklist) ───────────
+# ── Role Restoration Logic ─────────────────────────────────────────────────────
 @bot.tree.command(name="restoreroles", description="Restore original roles if your suspension has expired")
 async def restoreroles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -552,12 +555,9 @@ async def restoreroles(interaction: discord.Interaction):
     for r_id in role_ids:
         role = interaction.guild.get_role(r_id)
         if role:
-            # 🔒 Safety Check: Block any role on the protected name list layout config array
             if role.name.strip() in PROTECTED_ROLE_NAMES:
                 continue
-            try: 
-                await interaction.user.add_roles(role)
-                restored += 1
+            try: await interaction.user.add_roles(role); restored += 1
             except Exception: pass
 
     for r, idx in history:
