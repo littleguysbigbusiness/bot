@@ -16,8 +16,9 @@ DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
-STATUS_CHANNEL_ID = 0  # Your new targeted status text channel
-STATIC_STATUS_ID  = 1505808587807789117  # Temporary placeholder (will auto-generate new one if not found)
+STATUS_CHANNEL_ID = 1476812926521184276  
+STATIC_STATUS_ID  = 1505559844449419284  
+APPEAL_CHANNEL_ID = 1420690312531017850  # Your targeted appeal review channel
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
@@ -161,6 +162,7 @@ class WarningsBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
     async def setup_hook(self):
+        self.add_view(AppealReviewButtons()) # Persistently registers buttons across restarts
         await self.tree.sync()
         print("✅ Slash commands synced.")
     async def on_ready(self):
@@ -181,34 +183,144 @@ async def dm_user(user, embed):
     except discord.Forbidden:
         return False
 
-# ── Status Loop (Adaptive Edit/Post Engine) ───────────────────────────────────
 @tasks.loop(seconds=60)
 async def update_status_embed():
     try:
         channel = bot.get_channel(STATUS_CHANNEL_ID)
-        if not channel: 
-            print(f"[Status] Channel targeting failed for ID: {STATUS_CHANNEL_ID}")
-            return
-            
+        if not channel: return
         resp = requests.get(STATUS_PAGE_URL, timeout=10)
-        if resp.status_code != 200: return
-        
-        embed = build_status_embed(resp.json())
+        if resp.status_code == 200:
+            embed = build_status_embed(resp.json())
+            try:
+                msg = await channel.fetch_message(STATIC_STATUS_ID)
+                await msg.edit(embed=embed)
+            except Exception: pass
+    except Exception: pass
 
-        # Attempt to edit your designated message ID configuration
-        try:
-            msg = await channel.fetch_message(STATIC_STATUS_ID)
-            await msg.edit(embed=embed)
-            print(f"[Status] Successfully edited active card {STATIC_STATUS_ID}")
+# ── Interactive Appeal System Elements ───────────────────────────────────────
+class AppealReasonModal(discord.ui.Modal, title="Submit Case File Appeal"):
+    appeal_reason = discord.ui.TextInput(
+        label="Why should this infraction be removed?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Provide clean operational context or evidence for review...",
+        required=True,
+        max_length=500
+    )
+
+    def __init__(self, case_id, original_reason, restriction_type):
+        super().__init__()
+        self.case_id = case_id
+        self.original_reason = original_reason
+        self.restriction_type = restriction_type
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        review_channel = bot.get_channel(APPEAL_CHANNEL_ID)
+        
+        if not review_channel:
+            await interaction.followup.send("❌ Internal Error: Appeal review pipeline channel could not be resolved.", ephemeral=True)
             return
-        except Exception:
-            # If the specific ID isn't found in this channel, post a brand new one from scratch!
-            print(f"⚠️ Message ID {STATIC_STATUS_ID} not found in this channel layout. Posting fresh status card...")
-            new_msg = await channel.send(embed=embed)
-            print(f"📡 FRESH EMED GENERATED! Target Message ID: {new_msg.id} — Copy this ID into your script settings configuration once fetched!")
+
+        review_embed = discord.Embed(
+            title="📥 System Infraction Appeal Submitted",
+            description=f"User {interaction.user.mention} has requested a file evaluation regarding an active system restriction.",
+            color=discord.Color.from_rgb(230, 126, 34)
+        )
+        review_embed.add_field(name="👤 Appellant", value=f"{interaction.user.mention}\n`ID: {interaction.user.id}`", inline=True)
+        review_embed.add_field(name="🆔 Target Case ID", value=f"`{self.case_id}`", inline=True)
+        review_embed.add_field(name="📊 Action Type", value=self.restriction_type, inline=True)
+        review_embed.add_field(name="📋 Original Reason Cell", value=f"```text\n{self.original_reason}\n```", inline=False)
+        review_embed.add_field(name="💬 Appellant Statement", value=f"```text\n{self.appeal_reason.value}\n```", inline=False)
+        review_embed.timestamp = datetime.datetime.utcnow()
+        review_embed.set_footer(text="Awaiting Administrator Clearance Evaluation")
+
+        await review_channel.send(embed=review_embed, view=AppealReviewButtons())
+        await interaction.followup.send("✅ **Success!** Your system appeal file has been dispatched to corporate administration for active review.", ephemeral=True)
+
+class AppealDropdownMenu(discord.ui.Select):
+    def __init__(self, user_active_cases):
+        options = []
+        for row, _ in user_active_cases:
+            case_id = row[COL_INCIDENT_ID].strip()
+            rest_type = row[COL_RESTRICTION].strip()
+            reason = row[COL_REASON].strip()
+            # Truncates descriptions to keep things safe inside select menu constraints
+            label_text = f"Case: {case_id} [{rest_type}]"
+            desc_text = reason[:50] + "..." if len(reason) > 50 else reason
+            options.append(discord.SelectOption(label=label_text, value=case_id, description=desc_text))
             
-    except Exception as e: 
-        print(f"[Status Engine] Fault encountered: {e}")
+        super().__init__(placeholder="Select an active infraction file to appeal...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        case_id = self.values[0]
+        row, _ = find_warning_by_id(case_id)
+        
+        if not row:
+            await interaction.response.send_message("❌ This case file data can no longer be resolved on the sheet tracker.", ephemeral=True)
+            return
+            
+        # Trigger the clean paragraph pop-up form text modal input setup
+        await interaction.response.send_modal(AppealReasonModal(case_id, row[COL_REASON], row[COL_RESTRICTION]))
+
+class AppealDropdownView(discord.ui.View):
+    def __init__(self, user_active_cases):
+        super().__init__(timeout=180)
+        self.add_item(AppealDropdownMenu(user_active_cases))
+
+class AppealReviewButtons(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # Keeps elements active permanently across long timelines
+
+    @discord.ui.button(label="Approve Appeal", style=discord.ButtonStyle.success, custom_id="approve_appeal_btn", emoji="🟢")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ You lack Administrative verification clearance.", ephemeral=True)
+        
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        case_id = embed.fields[1].value.replace("`", "").strip()
+        appellant_id = int(embed.fields[0].value.split("\n`ID: ")[1].replace("`", "").strip())
+
+        row, sheet_row = find_warning_by_id(case_id)
+        if row and row[COL_REVOKED].strip().upper() != "TRUE":
+            row[COL_REVOKED]    = "TRUE"
+            row[COL_REVOKED_BY] = f"Appeal Appr: {interaction.user}"
+            row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            update_row(sheet_row, row)
+
+        # Notify the user via direct message
+        try:
+            target_user = await bot.fetch_user(appellant_id)
+            dm_embed = discord.Embed(title="✅ Appeal Approved", description=f"Your appeal for Case ID `{case_id}` has been accepted by server administration. The infraction has been expunged.", color=discord.Color.green())
+            await target_user.send(embed=dm_embed)
+        except Exception: pass
+
+        embed.color = discord.Color.green()
+        embed.title = "✅ Appeal Cleared & Approved"
+        embed.set_footer(text=f"Approved and expunged by {interaction.user}")
+        await interaction.message.edit(embed=embed, view=None)
+
+    @discord.ui.button(label="Deny Appeal", style=discord.ButtonStyle.danger, custom_id="deny_appeal_btn", emoji="🔴")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ You lack Administrative verification clearance.", ephemeral=True)
+        
+        await interaction.response.defer()
+        embed = interaction.message.embeds[0]
+        case_id = embed.fields[1].value.replace("`", "").strip()
+        appellant_id = int(embed.fields[0].value.split("\n`ID: ")[1].replace("`", "").strip())
+
+        # Notify the user via direct message
+        try:
+            target_user = await bot.fetch_user(appellant_id)
+            dm_embed = discord.Embed(title="❌ Appeal Denied", description=f"Your appeal regarding Case ID `{case_id}` has been reviewed and rejected by server administration. The penalty remains active.", color=discord.Color.red())
+            await target_user.send(embed=dm_embed)
+        except Exception: pass
+
+        embed.color = discord.Color.red()
+        embed.title = "❌ Appeal Evaluated & Rejected"
+        embed.set_footer(text=f"Rejected upon administrative review by {interaction.user}")
+        await interaction.message.edit(embed=embed, view=None)
 
 # ── Universal Action Master Function ───────────────────────────────────────────
 async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, end_date: str):
@@ -251,6 +363,20 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     await interaction.followup.send(embed=embed)
 
 # ── Moderation Commands ────────────────────────────────────────────────────────
+@bot.tree.command(name="appeal", description="Submit an evaluation appeal form for an active infraction file")
+async def appeal(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    warnings = get_user_warnings(str(interaction.user.id))
+    active_cases = [(r, idx) for r, idx in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
+
+    if not active_cases:
+        await interaction.followup.send("✅ **Clean Record:** You currently do not have any active warnings or restrictions available to appeal!", ephemeral=True)
+        return
+
+    # Serve the dropdown selector menu component stack
+    view = AppealDropdownView(active_cases)
+    await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the specific Case ID file you want to lodge an official appeal against from the dropdown module below:", view=view, ephemeral=True)
+
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
