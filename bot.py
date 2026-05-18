@@ -18,7 +18,7 @@ SHEET_NAME        = "Violations"
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505559844449419284  
-APPEAL_CHANNEL_ID = 1420690312531017850  # Your targeted appeal review channel
+APPEAL_CHANNEL_ID = 1420690312531017850  
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
@@ -162,7 +162,7 @@ class WarningsBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
     async def setup_hook(self):
-        self.add_view(AppealReviewButtons()) # Persistently registers buttons across restarts
+        self.add_view(AppealReviewButtons()) 
         await self.tree.sync()
         print("✅ Slash commands synced.")
     async def on_ready(self):
@@ -199,13 +199,7 @@ async def update_status_embed():
 
 # ── Interactive Appeal System Elements ───────────────────────────────────────
 class AppealReasonModal(discord.ui.Modal, title="Submit Case File Appeal"):
-    appeal_reason = discord.ui.TextInput(
-        label="Why should this infraction be removed?",
-        style=discord.TextStyle.paragraph,
-        placeholder="Provide clean operational context or evidence for review...",
-        required=True,
-        max_length=500
-    )
+    appeal_reason = discord.ui.TextInput(label="Why should this infraction be removed?", style=discord.TextStyle.paragraph, placeholder="Provide clean operational context or evidence for review...", required=True, max_length=500)
 
     def __init__(self, case_id, original_reason, restriction_type):
         super().__init__()
@@ -216,23 +210,17 @@ class AppealReasonModal(discord.ui.Modal, title="Submit Case File Appeal"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         review_channel = bot.get_channel(APPEAL_CHANNEL_ID)
-        
         if not review_channel:
-            await interaction.followup.send("❌ Internal Error: Appeal review pipeline channel could not be resolved.", ephemeral=True)
+            await interaction.followup.send("❌ Internal Error: Appeal review channel missing.", ephemeral=True)
             return
 
-        review_embed = discord.Embed(
-            title="📥 System Infraction Appeal Submitted",
-            description=f"User {interaction.user.mention} has requested a file evaluation regarding an active system restriction.",
-            color=discord.Color.from_rgb(230, 126, 34)
-        )
+        review_embed = discord.Embed(title="📥 System Infraction Appeal Submitted", description=f"User {interaction.user.mention} has requested a file evaluation regarding an active system restriction.", color=discord.Color.from_rgb(230, 126, 34))
         review_embed.add_field(name="👤 Appellant", value=f"{interaction.user.mention}\n`ID: {interaction.user.id}`", inline=True)
         review_embed.add_field(name="🆔 Target Case ID", value=f"`{self.case_id}`", inline=True)
         review_embed.add_field(name="📊 Action Type", value=self.restriction_type, inline=True)
         review_embed.add_field(name="📋 Original Reason Cell", value=f"```text\n{self.original_reason}\n```", inline=False)
         review_embed.add_field(name="💬 Appellant Statement", value=f"```text\n{self.appeal_reason.value}\n```", inline=False)
         review_embed.timestamp = datetime.datetime.utcnow()
-        review_embed.set_footer(text="Awaiting Administrator Clearance Evaluation")
 
         await review_channel.send(embed=review_embed, view=AppealReviewButtons())
         await interaction.followup.send("✅ **Success!** Your system appeal file has been dispatched to corporate administration for active review.", ephemeral=True)
@@ -244,22 +232,14 @@ class AppealDropdownMenu(discord.ui.Select):
             case_id = row[COL_INCIDENT_ID].strip()
             rest_type = row[COL_RESTRICTION].strip()
             reason = row[COL_REASON].strip()
-            # Truncates descriptions to keep things safe inside select menu constraints
-            label_text = f"Case: {case_id} [{rest_type}]"
-            desc_text = reason[:50] + "..." if len(reason) > 50 else reason
-            options.append(discord.SelectOption(label=label_text, value=case_id, description=desc_text))
-            
+            options.append(discord.SelectOption(label=f"Case: {case_id} [{rest_type}]", value=case_id, description=reason[:50]))
         super().__init__(placeholder="Select an active infraction file to appeal...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         case_id = self.values[0]
         row, _ = find_warning_by_id(case_id)
-        
         if not row:
-            await interaction.response.send_message("❌ This case file data can no longer be resolved on the sheet tracker.", ephemeral=True)
-            return
-            
-        # Trigger the clean paragraph pop-up form text modal input setup
+            return await interaction.response.send_message("❌ Case resolved or moved.", ephemeral=True)
         await interaction.response.send_modal(AppealReasonModal(case_id, row[COL_REASON], row[COL_RESTRICTION]))
 
 class AppealDropdownView(discord.ui.View):
@@ -269,13 +249,11 @@ class AppealDropdownView(discord.ui.View):
 
 class AppealReviewButtons(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # Keeps elements active permanently across long timelines
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="Approve Appeal", style=discord.ButtonStyle.success, custom_id="approve_appeal_btn", emoji="🟢")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            return await interaction.response.send_message("❌ You lack Administrative verification clearance.", ephemeral=True)
-        
+        if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
         await interaction.response.defer()
         embed = interaction.message.embeds[0]
         case_id = embed.fields[1].value.replace("`", "").strip()
@@ -288,41 +266,33 @@ class AppealReviewButtons(discord.ui.View):
             row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             update_row(sheet_row, row)
 
-        # Notify the user via direct message
         try:
             target_user = await bot.fetch_user(appellant_id)
-            dm_embed = discord.Embed(title="✅ Appeal Approved", description=f"Your appeal for Case ID `{case_id}` has been accepted by server administration. The infraction has been expunged.", color=discord.Color.green())
-            await target_user.send(embed=dm_embed)
+            await target_user.send(embed=discord.Embed(title="✅ Appeal Approved", description=f"Your appeal for Case ID `{case_id}` has been accepted. The infraction has been expunged.", color=discord.Color.green()))
         except Exception: pass
 
-        embed.color = discord.Color.green()
-        embed.title = "✅ Appeal Cleared & Approved"
-        embed.set_footer(text=f"Approved and expunged by {interaction.user}")
+        embed.color, embed.title = discord.Color.green(), "✅ Appeal Cleared & Approved"
+        embed.set_footer(text=f"Approved by {interaction.user}")
         await interaction.message.edit(embed=embed, view=None)
 
     @discord.ui.button(label="Deny Appeal", style=discord.ButtonStyle.danger, custom_id="deny_appeal_btn", emoji="🔴")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            return await interaction.response.send_message("❌ You lack Administrative verification clearance.", ephemeral=True)
-        
+        if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
         await interaction.response.defer()
         embed = interaction.message.embeds[0]
         case_id = embed.fields[1].value.replace("`", "").strip()
         appellant_id = int(embed.fields[0].value.split("\n`ID: ")[1].replace("`", "").strip())
 
-        # Notify the user via direct message
         try:
             target_user = await bot.fetch_user(appellant_id)
-            dm_embed = discord.Embed(title="❌ Appeal Denied", description=f"Your appeal regarding Case ID `{case_id}` has been reviewed and rejected by server administration. The penalty remains active.", color=discord.Color.red())
-            await target_user.send(embed=dm_embed)
+            await target_user.send(embed=discord.Embed(title="❌ Appeal Denied", description=f"Your appeal for Case ID `{case_id}` has been rejected.", color=discord.Color.red()))
         except Exception: pass
 
-        embed.color = discord.Color.red()
-        embed.title = "❌ Appeal Evaluated & Rejected"
-        embed.set_footer(text=f"Rejected upon administrative review by {interaction.user}")
+        embed.color, embed.title = discord.Color.red(), "❌ Appeal Evaluated & Rejected"
+        embed.set_footer(text=f"Rejected upon review by {interaction.user}")
         await interaction.message.edit(embed=embed, view=None)
 
-# ── Universal Action Master Function ───────────────────────────────────────────
+# ── Universal Action Master Engine (Now Handles Live API Penalties) ───────────
 async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, end_date: str):
     warning_id = str(uuid.uuid4())[:8].upper()
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -331,6 +301,37 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
 
     all_warnings = get_user_warnings(str(user.id))
     active_count = sum(1 for r, _ in all_warnings if pad(r)[COL_REVOKED].upper() != "TRUE") + 1
+
+    # ── LIVE NATIVE API ENFORCEMENTS ──
+    execution_notes = "Logged to Database"
+    
+    if source == "Discord":
+        if restriction_type == "Timeout":
+            if end_date:
+                try:
+                    target_expiry = datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
+                    duration = target_expiry - datetime.datetime.utcnow()
+                    if duration.total_seconds() > 0:
+                        await user.timeout(duration, reason=reason)
+                        execution_notes = f"Timed out until {end_date}"
+                    else:
+                        execution_notes = "Logged (Expiry date is historical)"
+                except Exception as e:
+                    execution_notes = f"Logged (Timeout failed: {e})"
+            else:
+                # Default safety fallback mute duration if field omitted
+                try:
+                    await user.timeout(datetime.timedelta(days=1), reason=reason)
+                    execution_notes = "Timed out for 24 Hours (Default)"
+                    final_expiry = (datetime.datetime.utcnow() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                except Exception as e: execution_notes = f"Logged (Timeout failed: {e})"
+
+        elif restriction_type == "Ban":
+            try:
+                await user.ban(delete_message_days=1, reason=reason)
+                execution_notes = "Banned cleanly from guild instance"
+            except Exception as e:
+                execution_notes = f"Logged (API Ban execution failed: {e})"
 
     append_row([
         str(user.id), str(user), str(interaction.user), str(interaction.user.id),
@@ -353,7 +354,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     embed.add_field(name="Type", value=f"**{restriction_type}**", inline=True)
     embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
-    embed.add_field(name="Source", value=source, inline=True)
+    embed.add_field(name="API Execution", value=f"`{execution_notes}`", inline=True)
     embed.add_field(name="Expiry Date", value=final_expiry, inline=True)
     embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="DM Delivery", value="✅ Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
@@ -362,20 +363,89 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     
     await interaction.followup.send(embed=embed)
 
+# ── Server Wide Statistics Command ─────────────────────────────────────────────
+@bot.tree.command(name="modstats", description="[Admin] View server-wide moderation metrics and leaderboard layout")
+async def modstats(interaction: discord.Interaction):
+    if not is_admin(interaction): 
+        return await interaction.response.send_message("❌ Administrative clearance verification required.", ephemeral=True)
+    
+    await interaction.response.defer()
+    rows = read_all_rows()
+    
+    if not rows:
+        await interaction.followup.send("📋 **Database Empty:** No operational infraction logs found on the spreadsheet tracking grid.")
+        return
+
+    total_logs = len(rows)
+    type_counts = {"Warning": 0, "Timeout": 0, "Ban": 0, "Staff Suspension": 0}
+    user_infractions = {}
+    admin_actions = {}
+
+    for raw_row in rows:
+        row = pad(raw_row)
+        is_revoked = row[COL_REVOKED].strip().upper() == "TRUE"
+        rest_type = row[COL_RESTRICTION].strip()
+        uid = row[COL_USER_ID].strip()
+        username = row[COL_USERNAME].strip()
+        admin_name = row[COL_ISSUED_BY].strip()
+
+        if rest_type in type_counts:
+            type_counts[rest_type] += 1
+
+        # Track user counts (only active ones count toward target record holder)
+        if not is_revoked and uid:
+            user_key = f"<@{uid}> (`{username}`)"
+            user_infractions[user_key] = user_infractions.get(user_key, 0) + 1
+
+        # Track admin actions (all actions logged count)
+        if admin_name:
+            admin_actions[admin_name] = admin_actions.get(admin_name, 0) + 1
+
+    # Resolve Leaderboards
+    top_user = "None"
+    max_user_count = 0
+    if user_infractions:
+        top_user_key = max(user_infractions, key=user_infractions.get)
+        max_user_count = user_infractions[top_user_key]
+        top_user = f"{top_user_key} — **{max_user_count}** active cases"
+
+    top_admin = "None"
+    max_admin_count = 0
+    if admin_actions:
+        top_admin_key = max(admin_actions, key=admin_actions.get)
+        max_admin_count = admin_actions[top_admin_key]
+        top_admin = f"👤 **{top_admin_key}** — **{max_admin_count}** actions logged"
+
+    embed = discord.Embed(
+        title="📊 Server Moderation Analytics Overview",
+        description="Centralized data insight compiled dynamically from the primary compliance log tracking sheet.",
+        color=discord.Color.from_rgb(44, 62, 80)
+    )
+    
+    breakdown_text = (
+        f"⚠️ **Warnings:** {type_counts['Warning']}\n"
+        f"⏳ **Timeouts:** {type_counts['Timeout']}\n"
+        f"🔨 **Bans:** {type_counts['Ban']}\n"
+        f"🛡️ **Staff Suspensions:** {type_counts['Staff Suspension']}"
+    )
+    
+    embed.add_field(name="📈 Metrics Scale", value=f"Total Records Logged: **{total_logs}**", inline=False)
+    embed.add_field(name="🗂️ Action Type Breakdown", value=breakdown_text, inline=True)
+    embed.add_field(name="🚨 Highest Active Infractions User", value=top_user, inline=False)
+    embed.add_field(name="👮 Top Enforcing Administrator", value=top_admin, inline=False)
+    embed.set_footer(text="Busways Operational Insights Control Panel")
+    embed.timestamp = datetime.datetime.utcnow()
+
+    await interaction.followup.send(embed=embed)
+
 # ── Moderation Commands ────────────────────────────────────────────────────────
 @bot.tree.command(name="appeal", description="Submit an evaluation appeal form for an active infraction file")
 async def appeal(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     warnings = get_user_warnings(str(interaction.user.id))
     active_cases = [(r, idx) for r, idx in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
-
-    if not active_cases:
-        await interaction.followup.send("✅ **Clean Record:** You currently do not have any active warnings or restrictions available to appeal!", ephemeral=True)
-        return
-
-    # Serve the dropdown selector menu component stack
-    view = AppealDropdownView(active_cases)
-    await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the specific Case ID file you want to lodge an official appeal against from the dropdown module below:", view=view, ephemeral=True)
+    if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
+    await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the specific Case ID file you want to appeal from the dropdown below:", view=AppealDropdownView(active_cases), ephemeral=True)
 
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
@@ -393,16 +463,16 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
     await interaction.response.defer()
     await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", end_date)
 
-@bot.tree.command(name="timeout", description="[Admin] Issue a timeout log entry")
-@app_commands.describe(user="The user", reason="Reason for timeout", source="Platform context", end_date="Expiry date (YYYY-MM-DD)")
+@bot.tree.command(name="timeout", description="[Admin] Time out a user natively and log to sheet")
+@app_commands.describe(user="The user to mute", reason="Reason for timeout", source="Platform context", end_date="Expiry date (YYYY-MM-DD) e.g. 2026-05-25")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
 async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     await run_moderation_action(interaction, user, reason, "Timeout", source.value if source else "Discord", end_date)
 
-@bot.tree.command(name="ban", description="[Admin] Log a ban enforcement record")
-@app_commands.describe(user="The user", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
+@bot.tree.command(name="ban", description="[Admin] Ban a user natively from the server and log to sheet")
+@app_commands.describe(user="The user to ban", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
 async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
@@ -415,95 +485,64 @@ async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason
 async def staff_suspension(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str, source: app_commands.Choice[str] = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-
-    try:
-        datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
-    except ValueError:
-        await interaction.followup.send("❌ **Error:** You must specify a valid expiry date matching `YYYY-MM-DD` formatting for staff suspensions.")
-        return
+    try: datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
+    except ValueError: return await interaction.followup.send("❌ **Error:** Expiry date must match `YYYY-MM-DD` formatting.")
 
     role_ids = [r.id for r in user.roles if r.name != "@everyone" and not r.managed]
     save_suspended_roles(user.id, role_ids)
-
     for role in user.roles:
         if role.name != "@everyone" and not role.managed:
             try: await user.remove_roles(role)
             except Exception: pass
-
     await run_moderation_action(interaction, user, reason, "Staff Suspension", source.value if source else "Discord", end_date)
 
 # ── Role Restoration Logic ─────────────────────────────────────────────────────
-@bot.tree.command(name="restoreroles", description="Restore your original roles if your suspension has expired")
+@bot.tree.command(name="restoreroles", description="Restore original roles if your suspension has expired")
 async def restoreroles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     user_id = interaction.user.id
     history = get_user_warnings(str(user_id))
-    
     suspensions = [r for r, _ in history if pad(r)[COL_RESTRICTION].strip() == "Staff Suspension" and pad(r)[COL_REVOKED].upper() != "TRUE"]
-    
-    if not suspensions:
-        await interaction.followup.send("❌ You do not have any active **Staff Suspension** logs registered.", ephemeral=True)
-        return
+    if not suspensions: return await interaction.followup.send("❌ You have no active Staff Suspension logs.", ephemeral=True)
 
     active_suspension = pad(suspensions[-1])
     expiry_str = active_suspension[COL_END_DATE].strip()
-
-    if expiry_str == "Never":
-        await interaction.followup.send("🔒 Your staff suspension is marked as **Permanent** and cannot be self-restored.", ephemeral=True)
-        return
+    if expiry_str == "Never": return await interaction.followup.send("🔒 Your suspension is marked as Permanent.", ephemeral=True)
 
     try:
-        expiry_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d")
-        current_date = datetime.datetime.utcnow()
-        
-        if current_date < expiry_date:
-            days_left = (expiry_date - current_date).days + 1
-            await interaction.followup.send(f"⏳ **Access Denied:** Your suspension is still active. It expires on `{expiry_str}` (~{days_left} days remaining).", ephemeral=True)
-            return
-    except ValueError:
-        await interaction.followup.send("❌ The expiry date in the sheet database is corrupted. Contact an Administrator.", ephemeral=True)
-        return
+        if datetime.datetime.strptime(expiry_str, "%Y-%m-%d") > datetime.datetime.utcnow():
+            return await interaction.followup.send(f"⏳ **Access Denied:** Suspension is active until `{expiry_str}`.", ephemeral=True)
+    except ValueError: return await interaction.followup.send("❌ Expiry date format corrupted on database sheet.", ephemeral=True)
 
     saved_ids = pop_suspended_roles(user_id)
-    if not saved_ids:
-        await interaction.followup.send("⚠️ No original role backups found in local server storage. Staff members must re-assign them manually.", ephemeral=True)
-        return
+    if not saved_ids: return await interaction.followup.send("⚠️ Original role backup file not found.", ephemeral=True)
 
-    restored_count = 0
-    guild = interaction.guild
+    restored = 0
     for r_id in saved_ids:
-        role = guild.get_role(r_id)
+        role = interaction.guild.get_role(r_id)
         if role:
-            try:
-                await interaction.user.add_roles(role)
-                restored_count += 1
+            try: await interaction.user.add_roles(role); restored += 1
             except Exception: pass
 
     for r, idx in history:
         if pad(r)[COL_INCIDENT_ID] == active_suspension[COL_INCIDENT_ID]:
             r_padded = pad(r)
-            r_padded[COL_REVOKED] = "TRUE"
-            r_padded[COL_REVOKED_BY] = "System Auto-Restore"
-            r_padded[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            r_padded[COL_REVOKED], r_padded[COL_REVOKED_BY], r_padded[COL_REVOKED_AT] = "TRUE", "System Auto-Restore", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             update_row(idx, r_padded)
             break
-
-    await interaction.followup.send(f"✅ **Success!** Your suspension has expired. Restored **{restored_count}** of your original staff roles cleanly.", ephemeral=True)
+    await interaction.followup.send(f"✅ **Success!** Restored **{restored}** original staff roles cleanly.", ephemeral=True)
 
 # ── General Lookups ────────────────────────────────────────────────────────────
-@bot.tree.command(name="revokewarning", description="[Admin] Revoke a warning/action by its Case ID")
-@app_commands.describe(warning_id="Case ID to revoke (e.g. AB12CD34)")
+@bot.tree.command(name="revokewarning", description="[Admin] Revoke an action by its Case ID")
+@app_commands.describe(warning_id="Case ID to revoke")
 async def revokewarning(interaction: discord.Interaction, warning_id: str):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-
     row, sheet_row = find_warning_by_id(warning_id)
-    if row is None: return await interaction.followup.send(f"❌ No file found with Case ID `{warning_id}`.")
-    if row[COL_REVOKED].strip().upper() == "TRUE": return await interaction.followup.send(f"⚠️ Case file `{warning_id}` has already been removed/revoked.")
+    if row is None: return await interaction.followup.send(f"❌ Case ID `{warning_id}` not found.")
+    if row[COL_REVOKED].strip().upper() == "TRUE": return await interaction.followup.send(f"⚠️ Case `{warning_id}` already revoked.")
 
-    row[COL_REVOKED]    = "TRUE"
-    row[COL_REVOKED_BY] = str(interaction.user)
-    row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    row[COL_REVOKED], row[COL_REVOKED_BY], row[COL_REVOKED_AT] = "TRUE", str(interaction.user), datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     update_row(sheet_row, row)
 
     embed = discord.Embed(title="✅ User Log Updated", color=discord.Color.from_rgb(39, 174, 96))
@@ -518,16 +557,14 @@ async def revokewarning(interaction: discord.Interaction, warning_id: str):
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     warnings = get_user_warnings(str(interaction.user.id))
-
     if not warnings:
-        embed = discord.Embed(title="User Moderation History", description="This menu is where you can view your past and current moderation history. Administrators can add incidents for any type of rule breaking.", color=discord.Color.from_rgb(44, 62, 80))
+        embed = discord.Embed(title="User Moderation History", description="This menu is where you can view your past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
         return await interaction.followup.send(embed=embed, ephemeral=True)
 
     active  = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
     revoked = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() == "TRUE"]
-
     embed = discord.Embed(title="User Moderation History", description="This menu is where you can view your past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
 
@@ -539,8 +576,6 @@ async def viewmywarnings(interaction: discord.Interaction):
         txt = ""
         for r, _ in revoked: txt += f"▪️ ID: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | {r[COL_REASON]} (Revoked)\n"
         embed.add_field(name=f"⚪ Historical Archive ({len(revoked)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-
-    embed.set_footer(text=f"Total Incidents Logged: {len(warnings)}")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user")
@@ -549,7 +584,6 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     warnings = get_user_warnings(str(user.id))
-
     if not warnings:
         embed = discord.Embed(title=f"User Log File — {user.display_name}", description="This menu is where you can view all past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
         embed.set_thumbnail(url=user.display_avatar.url)
@@ -558,7 +592,6 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
 
     active  = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
     revoked = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() == "TRUE"]
-
     embed = discord.Embed(title=f"User Log File — {user.display_name}", description="This menu is where you can view all past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
     embed.set_thumbnail(url=user.display_avatar.url)
 
@@ -570,8 +603,6 @@ async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
         txt = ""
         for r, _ in revoked: txt += f"▪️ Case: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | {r[COL_REASON]} (Revoked)\n"
         embed.add_field(name=f"⚪ Historical Archive ({len(revoked)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-
-    embed.set_footer(text=f"Total Incidents Logged: {len(warnings)}")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ── Production Flask Engine Server ─────────────────────────────────────────────
@@ -579,9 +610,7 @@ app = Flask(__name__)
 @app.route('/')
 def home(): return "BWR7 Warnings Bot is Online Framework Stable!", 200
 
-def run_web_server():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
+def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 def run_discord_bot():
     if not DISCORD_TOKEN: return
     bot.run(DISCORD_TOKEN)
