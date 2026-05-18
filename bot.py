@@ -77,7 +77,7 @@ def sheets_headers():
 
 # ── Sheets helpers ─────────────────────────────────────────────────────────────
 def pad(row, length=16):
-    return list(row) + [""] * (length - len(row)) = []
+    return list(row) + [""] * (length - len(row))
 
 def read_all_rows():
     try:
