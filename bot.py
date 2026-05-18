@@ -23,7 +23,7 @@ APPEAL_CHANNEL_ID = 1420690312531017850
 # Your official application link assets
 GOOGLE_APPEAL_FORM_URL = "https://forms.google.com" 
 
-# Scale endpoints to 16 columns (A:P) to include the new role database column
+# Scale endpoints to 16 columns (A:P) to include the role database column
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:P"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:P:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
@@ -45,6 +45,16 @@ COL_START_DATE  = 12
 COL_END_DATE    = 13
 COL_ALT_INC_ID  = 14
 COL_BACKUP_ROLES = 15  # Column P: Stores comma-separated staff role IDs
+
+# Explicitly blacklisted role names that the system will NEVER restore automatically
+PROTECTED_ROLE_NAMES = [
+    "Rythm", "TTS Bot", "GiveawayBot", "Appy", "Application Blacklist...", "Busways OGS",
+    "Near/Lived/Lives/R7", "He’s A Great Guy I Th...", "Service Pings", "astras Playhouse Key",
+    "TTS", "Muted", "Security", "Warning 1", "Warning 2", "Warning 3", "Strike 1", "Strike 2",
+    "Strike 3", "Staff Blacklisted", "Busways Assistance", "Partner", "Former Staff", 
+    "P-Passenger", "Dev Pings", "Giveaway Pings", "Application Pings", "Dyno", "Quark Logger", 
+    "Tickets v2", "BD Department", "BM Department"
+]
 
 # ── Google Service Account Authentication ─────────────────────────────────────
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -80,7 +90,7 @@ def read_all_rows():
 
 def append_row(row):
     try:
-        requests.post(SHEVE_APPEND_URL if 'SHEVE_APPEND_URL' in locals() else SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
     except Exception as e:
         print(f"[Sheets] Append error: {e}")
 
@@ -237,7 +247,6 @@ class AppealReviewButtons(discord.ui.View):
 
         row, sheet_row = find_warning_by_id(case_id)
         if row and row[COL_REVOKED].strip().upper() != "TRUE":
-            # Direct API punishment lifting with automatic role restoration read from the sheet!
             await execute_live_punishment_revocation(interaction.guild, row, str(interaction.user))
             row[COL_REVOKED]    = "TRUE"
             row[COL_REVOKED_BY] = f"Appeal Appr: {interaction.user}"
@@ -270,7 +279,7 @@ class AppealReviewButtons(discord.ui.View):
         embed.set_footer(text=f"Rejected upon review by {interaction.user}")
         await interaction.message.edit(embed=embed, view=None)
 
-# ── Automated Active Penalty Lift Engine (Reads Directly From Spreadsheet) ──────
+# ── Automated Active Penalty Lift Engine ───────────────────────────────────────
 async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_name: str) -> str:
     uid = int(row[COL_USER_ID].strip())
     rest_type = row[COL_RESTRICTION].strip()
@@ -293,7 +302,6 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
         except Exception as e: return f"API Unban execution failed: {e}"
 
     elif rest_type == "Staff Suspension":
-        # Pulls the raw comma-separated text string straight from Column P of your sheet!
         raw_roles = row[COL_BACKUP_ROLES].strip()
         if not raw_roles: return "Staff Suspension lifted (No spreadsheet backup roles stored)"
         
@@ -301,25 +309,29 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
             member = await guild.fetch_member(uid)
             if member:
                 restored = 0
-                # Splits the cell text back into individual numeric role IDs
                 role_ids = [int(r.strip()) for r in raw_roles.split(",") if r.strip().isdigit()]
                 for r_id in role_ids:
                     role = guild.get_role(r_id)
                     if role:
-                        try: await member.add_roles(role); restored += 1
+                        # 🔒 Double Check: Ensure role name is NOT inside our protected list layout configuration
+                        if role.name.strip() in PROTECTED_ROLE_NAMES:
+                            print(f"[Security] Skipped restoration of protected role: {role.name}")
+                            continue
+                        try: 
+                            await member.add_roles(role)
+                            restored += 1
                         except Exception: pass
                 return f"Staff Suspension lifted ({restored} spreadsheet roles restored)"
         except Exception as e: return f"Staff Suspension role allocation error: {e}"
 
     return "Database trail flagged"
 
-# ── Universal Action Master Engine (Saves Backup Roles to Spreadsheet) ─────────
+# ── Universal Action Master Engine ─────────────────────────────────────────────
 async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, final_expiry: str, duration_delta: datetime.timedelta = None, backup_roles_str: str = "") -> str:
     warning_id = str(uuid.uuid4())[:8].upper()
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     start_date = timestamp[:10]
 
-    # 1. GENERATE THE SECURE CONTEXT EMBED CARD SYSTEM
     dm_embed = discord.Embed(title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", color=discord.Color.from_rgb(44, 62, 80))
     dm_embed.add_field(name="📋 Infraction Type", value=restriction_type, inline=True)
     dm_embed.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
@@ -332,12 +344,9 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     dm_embed.set_footer(text="Automated Compliance Engine • Busways Administration")
     dm_embed.timestamp = datetime.datetime.utcnow()
 
-    # 2. DISPATCH THE USER NOTICE IMMEDIATELY BEFORE EXECUTION PIPELINE
     dm_sent = await dm_user(user, dm_embed)
 
-    # 3. RUN LIVE API PENALTY OPERATIONS
     execution_notes = "Logged to Database"
-    
     if source == "Discord":
         if restriction_type == "Timeout" and duration_delta:
             try:
@@ -350,11 +359,10 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
                 execution_notes = "Banned cleanly from guild instance"
             except Exception as e: execution_notes = f"Logged (API Ban execution failed: {e})"
 
-    # 4. LOG ENTRY TRANSACTION TO SPREADSHEET ROW BACKUP (A to P matching array)
     append_row([
         str(user.id), str(user), str(interaction.user), str(interaction.user.id),
         reason, timestamp, warning_id, "FALSE", "", "", source, restriction_type, start_date, final_expiry, warning_id,
-        backup_roles_str  # Writes the comma-separated role list directly to Column P!
+        backup_roles_str  
     ])
 
     embed = discord.Embed(title=f"🛑 User Log Added ({restriction_type})", description=f"A formal {restriction_type.lower()} record has been generated and securely logged to the central database.", color=discord.Color.from_rgb(44, 62, 80))
@@ -369,7 +377,6 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     embed.add_field(name="DM Delivery", value="✅ Pre-Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     embed.set_footer(text=f"To undo this record file, execute: /revokeaction {warning_id}")
     embed.timestamp = datetime.datetime.utcnow()
-    
     await interaction.followup.send(embed=embed)
 
 # ── General Lookups & Revocation Dashboard Commands ───────────────────────────
@@ -450,6 +457,7 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
+# ── Moderation Commands ────────────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
@@ -516,10 +524,9 @@ async def staff_suspension(interaction: discord.Interaction, user: discord.Membe
             try: await user.remove_roles(role)
             except Exception: pass
             
-    # Send transaction to master action engine to execute logging
     await run_moderation_action(interaction, user, reason, "Staff Suspension", source.value if source else "Discord", end_date, backup_roles_str=backup_roles_str)
 
-# ── Role Restoration Logic (Reads Directly From Spreadsheet) ───────────────────
+# ── Role Restoration Logic (Cross-Checks Your New Safety Blacklist) ───────────
 @bot.tree.command(name="restoreroles", description="Restore original roles if your suspension has expired")
 async def restoreroles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -545,7 +552,12 @@ async def restoreroles(interaction: discord.Interaction):
     for r_id in role_ids:
         role = interaction.guild.get_role(r_id)
         if role:
-            try: await interaction.user.add_roles(role); restored += 1
+            # 🔒 Safety Check: Block any role on the protected name list layout config array
+            if role.name.strip() in PROTECTED_ROLE_NAMES:
+                continue
+            try: 
+                await interaction.user.add_roles(role)
+                restored += 1
             except Exception: pass
 
     for r, idx in history:
