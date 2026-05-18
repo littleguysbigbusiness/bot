@@ -7,7 +7,7 @@ import datetime
 import requests
 import threading
 import json
-from flask import Flask
+from flask import Flask, request, jsonify
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
@@ -330,7 +330,6 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     start_date = timestamp[:10]
 
-    # 🚀 AUTOMATION HACK: Grabs their Nickname (Roblox Name) instead of raw Discord tag strings!
     roblox_username = user.nick if user.nick else user.display_name
 
     dm_embed = discord.Embed(title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", color=discord.Color.from_rgb(44, 62, 80))
@@ -460,7 +459,6 @@ async def appeal(interaction: discord.Interaction):
 
 # ── Split Source Lookup Functions ─────────────────────────────────────────────
 def compile_split_warnings_embed(embed, warnings):
-    """Parses row histories and splits active logs between Discord and Roblox arrays."""
     active_discord = []
     active_roblox = []
     revoked_list = []
@@ -583,50 +581,41 @@ async def staff_suspension(interaction: discord.Interaction, user: discord.Membe
             
     await run_moderation_action(interaction, user, reason, "Staff Suspension", "Discord", end_date, backup_roles_str=backup_roles_str)
 
-# ── Role Restoration Logic ─────────────────────────────────────────────────────
-@bot.tree.command(name="restoreroles", description="Restore original roles if your suspension has expired")
-async def restoreroles(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    user_id = interaction.user.id
-    history = get_user_warnings(str(user_id))
-    suspensions = [r for r, _ in history if pad(r)[COL_RESTRICTION].strip() == "Staff Suspension" and pad(r)[COL_REVOKED].upper() != "TRUE"]
-    if not suspensions: return await interaction.followup.send("❌ No active Staff Suspension logs.", ephemeral=True)
-
-    active_suspension = pad(suspensions[-1])
-    expiry_str = active_suspension[COL_END_DATE].strip()
-    if expiry_str == "Never": return await interaction.followup.send("🔒 Suspension is marked as Permanent.", ephemeral=True)
-
+# ── PRODUCTION ROBLOX INBOUND ENDPOINTS ─────────────────────────────────────────
+@app.route('/api/roblox/violation', methods=['POST'])
+def roblox_violation_inbound():
     try:
-        if datetime.datetime.strptime(expiry_str, "%Y-%m-%d") > datetime.datetime.utcnow():
-            return await interaction.followup.send(f"⏳ Suspension active until `{expiry_str}`.", ephemeral=True)
-    except ValueError: return await interaction.followup.send("❌ Format corrupted on sheet.", ephemeral=True)
-
-    raw_roles = active_suspension[COL_BACKUP_ROLES].strip()
-    if not raw_roles: return await interaction.followup.send("⚠️ No backup roles found inside your spreadsheet file row.", ephemeral=True)
-
-    restored = 0
-    role_ids = [int(r.strip()) for r in raw_roles.split(",") if r.strip().isdigit()]
-    for r_id in role_ids:
-        role = interaction.guild.get_role(r_id)
-        if role:
-            if role.name.strip() in PROTECTED_ROLE_NAMES:
-                continue
-            try: await interaction.user.add_roles(role); restored += 1
-            except Exception: pass
-
-    for r, idx in history:
-        if pad(r)[COL_INCIDENT_ID] == active_suspension[COL_INCIDENT_ID]:
-            r_padded = pad(r)
-            r_padded[COL_REVOKED], r_padded[COL_REVOKED_BY], r_padded[COL_REVOKED_AT] = "TRUE", "System Auto-Restore", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            update_row(idx, r_padded)
-            break
-    await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly from spreadsheet backup.", ephemeral=True)
+        data = request.json
+        action = data.get("action")
+        
+        if action == "add":
+            timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            append_row([
+                str(data.get("userId")), str(data.get("username")), str(data.get("issuedBy")), "",
+                str(data.get("reason")), timestamp, str(data.get("incidentId")), "FALSE", "", "",
+                "Roblox Game", str(data.get("restriction")), str(data.get("startDate")), str(data.get("endDate")), str(data.get("incidentId")), ""
+            ])
+            print(f"[API] Logged inbound Roblox Game violation file: {data.get('incidentId')}")
+            return jsonify({"status": "success", "message": "Logged successfully"}), 200
+            
+        elif action == "revoke":
+            case_id = str(data.get("incidentId")).strip().upper()
+            row, sheet_row = find_warning_by_id(case_id)
+            if row:
+                row[COL_REVOKED]    = "TRUE"
+                row[COL_REVOKED_BY] = f"In-Game: {data.get('revokedBy')}"
+                row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                update_row(sheet_row, row)
+                print(f"[API] Revoked inbound Roblox Game infraction file: {case_id}")
+                return jsonify({"status": "success", "message": "Revoked successfully"}), 200
+            return jsonify({"status": "error", "message": "Case ID not found"}), 404
+            
+    except Exception as e:
+        print(f"[API Error] Inbound route breakdown: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ── Production Flask Engine Server ─────────────────────────────────────────────
 app = Flask(__name__)
-@app.route('/')
-def home(): return "BWR7 Warnings Bot is Online Framework Stable!", 200
-
 def run_web_server(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 def run_discord_bot():
     if not DISCORD_TOKEN: return
