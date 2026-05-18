@@ -505,15 +505,16 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
+# 🚀 RESTORED SEAMLESS ONE-CLICK RUN: Options box parameter completely stripped out!
 @bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
-@app_commands.describe(user_id="Your target unique numerical User ID")
-async def viewmywarnings(interaction: discord.Interaction, user_id: str):
+async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if user_id.strip() != str(interaction.user.id):
-        return await interaction.followup.send("❌ **Access Denied:** You are only permitted to query your own numerical User ID profile via this command block.", ephemeral=True)
-        
-    warnings = get_user_warnings(user_id.strip())
+    
+    # Grabs clicking user's unique string footprint automatically behind the scenes
+    user_id = str(interaction.user.id)
+    warnings = get_user_warnings(user_id)
     embed = discord.Embed(title="User Moderation History", description="Your logs are categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
     
     if not warnings:
         embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
