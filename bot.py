@@ -21,7 +21,6 @@ STATIC_STATUS_ID  = 1505559844449419284
 APPEAL_CHANNEL_ID = 1420690312531017850  
 
 # Your official application link assets
-BOT_INVITE_URL         = "https://discord.com/oauth2/authorize?client_id=1476833993671446628"
 GOOGLE_APPEAL_FORM_URL = "https://forms.google.com" # <-- Swap with your actual Google Form link later!
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
@@ -337,17 +336,13 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
 
     return "Database trail flagged"
 
-# ── Universal Action Master Engine (Dispatches DM Before API Ban Execution) ────
-async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, end_date: str):
+# ── Universal Action Master Engine ─────────────────────────────────────────────
+async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, final_expiry: str, duration_delta: datetime.timedelta = None):
     warning_id = str(uuid.uuid4())[:8].upper()
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     start_date = timestamp[:10]
-    final_expiry = end_date if end_date else "Never"
 
-    all_warnings = get_user_warnings(str(user.id))
-    active_count = sum(1 for r, _ in all_warnings if pad(r)[COL_REVOKED].upper() != "TRUE") + 1
-
-    # 1. GENERATE THE CONTEXT EMBED CARD SYSTEM
+    # 1. GENERATE THE SECURE CONTEXT EMBED CARD SYSTEM
     dm_embed = discord.Embed(
         title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", 
         description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", 
@@ -362,9 +357,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     form_instructions = (
         "If you are banned or restricted from server channels and cannot submit an in-app `/appeal`, "
         f"you may lodge an external case evaluation request via our primary appeal form:\n"
-        f"📋 **[Click Here to Open Google Appeal Form]({GOOGLE_APPEAL_FORM_URL})**\n\n"
-        "To review bot deployment status or invite properties externally, use this link:\n"
-        f"🛰️ **[Busways Assistance Application Invite Gateway]({BOT_INVITE_URL})**"
+        f"📋 **[Click Here to Open Google Appeal Form]({GOOGLE_APPEAL_FORM_URL})**"
     )
     dm_embed.add_field(name="⚖️ External Appeal Request Notice", value=form_instructions, inline=False)
     dm_embed.set_footer(text="Automated Compliance Engine • Busways Administration")
@@ -377,26 +370,14 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     execution_notes = "Logged to Database"
     
     if source == "Discord":
-        if restriction_type == "Timeout":
-            if end_date:
-                try:
-                    target_expiry = datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
-                    duration = target_expiry - datetime.datetime.utcnow()
-                    if duration.total_seconds() > 0:
-                        await user.timeout(duration, reason=reason)
-                        execution_notes = f"Timed out until {end_date}"
-                    else: execution_notes = "Logged (Expiry date is historical)"
-                except Exception as e: execution_notes = f"Logged (Timeout failed: {e})"
-            else:
-                try:
-                    await user.timeout(datetime.timedelta(days=1), reason=reason)
-                    execution_notes = "Timed out for 24 Hours (Default)"
-                    final_expiry = (datetime.datetime.utcnow() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-                except Exception as e: execution_notes = f"Logged (Timeout failed: {e})"
+        if restriction_type == "Timeout" and duration_delta:
+            try:
+                await user.timeout(duration_delta, reason=reason)
+                execution_notes = f"Timed out natively until UTC timestamp"
+            except Exception as e: execution_notes = f"Logged (Timeout API call failed: {e})"
 
         elif restriction_type == "Ban":
             try:
-                # Ban triggers seamlessly right here after notice delivery has successfully completed
                 await user.ban(delete_message_days=1, reason=reason)
                 execution_notes = "Banned cleanly from guild instance"
             except Exception as e: execution_notes = f"Logged (API Ban execution failed: {e})"
@@ -414,7 +395,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     embed.add_field(name="Type", value=f"**{restriction_type}**", inline=True)
     embed.add_field(name="Reason", value=f"```text\n{reason}\n```", inline=False)
     embed.add_field(name="API Execution", value=f"`{execution_notes}`", inline=True)
-    embed.add_field(name="Expiry Date", value=final_expiry, inline=True)
+    embed.add_field(name="Expiry Timestamp", value=f"`{final_expiry}`", inline=True)
     embed.add_field(name="Issuer", value=f"{interaction.user.mention}", inline=True)
     embed.add_field(name="DM Delivery", value="✅ Pre-Dispatched" if dm_sent else "❌ Closed DMs", inline=True)
     embed.set_footer(text=f"To undo this record file, execute: /revokeaction {warning_id}")
@@ -426,7 +407,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
 @bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and instantly lift its punishment")
 @app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
 async def revokeaction(interaction: discord.Interaction, case_id: str):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", inline=True)
     await interaction.response.defer()
     row, sheet_row = find_warning_by_id(case_id)
     if row is None: return await interaction.followup.send(f"❌ Case ID `{case_id}` not found on database sheet.")
@@ -500,13 +481,15 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
+# ── Moderation Commands ────────────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-    await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", end_date)
+    expiry = end_date if end_date else "Never"
+    await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", expiry)
 
 @bot.tree.command(name="issuewarning", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
@@ -514,15 +497,35 @@ async def warn(interaction: discord.Interaction, user: discord.Member, reason: s
 async def issuewarning(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-    await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", end_date)
+    expiry = end_date if end_date else "Never"
+    await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", expiry)
 
-@bot.tree.command(name="timeout", description="[Admin] Time out a user natively and log to sheet")
-@app_commands.describe(user="The user to mute", reason="Reason for timeout", source="Platform context", end_date="Expiry date (YYYY-MM-DD)")
-@app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
-async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
+@bot.tree.command(name="timeout", description="[Admin] Time out a user natively using duration variables")
+@app_commands.describe(user="The user to mute", reason="Reason for timeout", duration_amount="The number value for time length", duration_unit="The unit of time measurement", source="Platform context")
+@app_commands.choices(
+    source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")],
+    duration_unit=[app_commands.Choice(name="Minutes", value="minutes"), app_commands.Choice(name="Hours", value="hours"), app_commands.Choice(name="Days", value="days")]
+)
+async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, duration_amount: int, duration_unit: app_commands.Choice[str], source: app_commands.Choice[str] = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-    await run_moderation_action(interaction, user, reason, "Timeout", source.value if source else "Discord", end_date)
+    
+    if duration_amount <= 0:
+        await interaction.followup.send("❌ **Error:** Duration amount value must be a positive integer.")
+        return
+
+    # Calculate exact delta duration mapping parameters
+    unit = duration_unit.value
+    if unit == "minutes": delta = datetime.timedelta(minutes=duration_amount)
+    elif unit == "hours": delta = datetime.timedelta(hours=duration_amount)
+    else: delta = datetime.timedelta(days=duration_amount)
+
+    # Convert directly to full structural UTC target stamp configuration formats
+    expiry_time = datetime.datetime.utcnow() + delta
+    final_expiry_stamp = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+    final_source = source.value if source else "Discord"
+
+    await run_moderation_action(interaction, user, reason, "Timeout", final_source, final_expiry_stamp, duration_delta=delta)
 
 @bot.tree.command(name="ban", description="[Admin] Ban a user natively from the server and log to sheet")
 @app_commands.describe(user="The user to ban", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
@@ -530,7 +533,8 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
 async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-    await run_moderation_action(interaction, user, reason, "Ban", source.value if source else "Discord", end_date)
+    expiry = end_date if end_date else "Never"
+    await run_moderation_action(interaction, user, reason, "Ban", source.value if source else "Discord", expiry)
 
 @bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and strip roles")
 @app_commands.describe(user="The staff member", reason="Reason for suspension", source="Platform context", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
