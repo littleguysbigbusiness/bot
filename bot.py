@@ -455,32 +455,90 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
-# ── Moderation Commands ────────────────────────────────────────────────────────
+# ── Split Source Lookup Functions ─────────────────────────────────────────────
+def compile_split_warnings_embed(embed, warnings):
+    """Parses row histories and splits active logs between Discord and Roblox arrays."""
+    active_discord = []
+    active_roblox = []
+    revoked_list = []
+
+    for r, _ in warnings:
+        padded = pad(r)
+        is_revoked = padded[COL_REVOKED].strip().upper() == "TRUE"
+        src = padded[COL_SOURCE].strip().lower()
+        
+        case_text = f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION]}\n  Reason: {padded[COL_REASON]}\n  Issued: {padded[COL_TIMESTAMP][:10]} | Expires: {padded[COL_END_DATE]}\n\n"
+        
+        if is_revoked:
+            revoked_list.append(f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION]} (Revoked)\n")
+        elif "roblox" in src:
+            active_roblox.append(case_text)
+        else:
+            active_discord.append(case_text)
+
+    if active_discord:
+        embed.add_field(name=f"🟢 Active Discord Records ({len(active_discord)})", value=f"```text\n{''.join(active_discord).strip()}\n```", inline=False)
+    if active_roblox:
+        embed.add_field(name=f"🎮 Active Roblox Records ({len(active_roblox)})", value=f"```text\n{''.join(active_roblox).strip()}\n```", inline=False)
+    if revoked_list:
+        embed.add_field(name=f"⚪ Historical Archive ({len(revoked_list)})", value=f"```text\n{''.join(revoked_list).strip()}\n```", inline=False)
+        
+    embed.set_footer(text=f"Total Infractions Cataloged: {len(warnings)}")
+    return embed
+
+@bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
+async def viewmywarnings(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    warnings = get_user_warnings(str(interaction.user.id))
+    
+    embed = discord.Embed(title="User Moderation History", description="Your logs are categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    
+    if not warnings:
+        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
+        return await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    embed = compile_split_warnings_embed(embed, warnings)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user split by platform")
+@app_commands.describe(user="The user to look up")
+async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
+    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    warnings = get_user_warnings(str(user.id))
+    
+    embed = discord.Embed(title=f"User Log File — {user.display_name}", description="Logs categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
+    embed.set_thumbnail(url=user.display_avatar.url)
+    
+    if not warnings:
+        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
+        return await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    embed = compile_split_warnings_embed(embed, warnings)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+# ── Moderation Commands (Forced Source Values) ──────────────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
-@app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
-@app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
-async def warn(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
+@app_commands.describe(user="The user to warn", reason="Reason for the warning", end_date="Optional expiry date (YYYY-MM-DD)")
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     expiry = end_date if end_date else "Never"
-    await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", expiry)
+    await run_moderation_action(interaction, user, reason, "Warning", "Discord", expiry)
 
 @bot.tree.command(name="issuewarning", description="[Admin] Issue a warning to a user")
-@app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
-@app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
-async def issuewarning(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
+@app_commands.describe(user="The user to warn", reason="Reason for the warning", end_date="Optional expiry date (YYYY-MM-DD)")
+async def issuewarning(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     expiry = end_date if end_date else "Never"
-    await run_moderation_action(interaction, user, reason, "Warning", source.value if source else "Discord", expiry)
+    await run_moderation_action(interaction, user, reason, "Warning", "Discord", expiry)
 
 @bot.tree.command(name="timeout", description="[Admin] Time out a user natively using duration variables")
-@app_commands.describe(user="The user to mute", reason="Reason for timeout", duration_amount="The number value for time length", duration_unit="The unit of time measurement", source="Platform context")
-@app_commands.choices(
-    source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")],
-    duration_unit=[app_commands.Choice(name="Minutes", value="minutes"), app_commands.Choice(name="Hours", value="hours"), app_commands.Choice(name="Days", value="days")]
-)
-async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, duration_amount: int, duration_unit: app_commands.Choice[str], source: app_commands.Choice[str] = None):
+@app_commands.describe(user="The user to mute", reason="Reason for timeout", duration_amount="The number value for time length", duration_unit="The unit of time measurement")
+@app_commands.choices(duration_unit=[app_commands.Choice(name="Minutes", value="minutes"), app_commands.Choice(name="Hours", value="hours"), app_commands.Choice(name="Days", value="days")])
+async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, duration_amount: int, duration_unit: app_commands.Choice[str]):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     if duration_amount <= 0: return await interaction.followup.send("❌ **Error:** Duration must be a positive number.")
@@ -492,42 +550,35 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
 
     expiry_time = datetime.datetime.utcnow() + delta
     final_expiry_stamp = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-    await run_moderation_action(interaction, user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, duration_delta=delta)
+    await run_moderation_action(interaction, user, reason, "Timeout", "Discord", final_expiry_stamp, duration_delta=delta)
 
 @bot.tree.command(name="ban", description="[Admin] Ban a user natively from the server and log to sheet")
-@app_commands.describe(user="The user to ban", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
-@app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
-async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, source: app_commands.Choice[str] = None, end_date: str = None):
+@app_commands.describe(user="The user to ban", reason="Reason for ban", end_date="Optional expiry date (YYYY-MM-DD)")
+async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     expiry = end_date if end_date else "Never"
-    await run_moderation_action(interaction, user, reason, "Ban", source.value if source else "Discord", expiry)
+    await run_moderation_action(interaction, user, reason, "Ban", "Discord", expiry)
 
-# ── Upgraded Staff Suspension Command (Bypasses Protected Role Stripping) ──────
-@bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and save role backups directly to Google Sheet")
-@app_commands.describe(user="The staff member", reason="Reason for suspension", source="Platform context", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
-@app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
-async def staff_suspension(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str, source: app_commands.Choice[str] = None):
+@bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and save roles to Sheet")
+@app_commands.describe(user="The staff member", reason="Reason for suspension", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
+async def staff_suspension(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     try: datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
     except ValueError: return await interaction.followup.send("❌ **Error:** Expiry date format required: `YYYY-MM-DD`")
 
-    # Capture all existing eligible role IDs for spreadsheet backup mapping
     role_ids = [str(r.id) for r in user.roles if r.name != "@everyone" and not r.managed]
     backup_roles_str = ",".join(role_ids)
 
-    # Strip roles natively from user profile, completely ignoring protected roles!
     for role in user.roles:
         if role.name != "@everyone" and not role.managed:
-            # 🔒 Immunity Filter: If the role is on your list, skip it entirely!
             if role.name.strip() in PROTECTED_ROLE_NAMES:
-                print(f"[Immunity] Skipped stripping protected role during suspension: {role.name}")
                 continue
             try: await user.remove_roles(role)
             except Exception: pass
             
-    await run_moderation_action(interaction, user, reason, "Staff Suspension", source.value if source else "Discord", end_date, backup_roles_str=backup_roles_str)
+    await run_moderation_action(interaction, user, reason, "Staff Suspension", "Discord", end_date, backup_roles_str=backup_roles_str)
 
 # ── Role Restoration Logic ─────────────────────────────────────────────────────
 @bot.tree.command(name="restoreroles", description="Restore original roles if your suspension has expired")
@@ -567,58 +618,6 @@ async def restoreroles(interaction: discord.Interaction):
             update_row(idx, r_padded)
             break
     await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly from spreadsheet backup.", ephemeral=True)
-
-@bot.tree.command(name="viewmywarnings", description="View all your warnings (private)")
-async def viewmywarnings(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    warnings = get_user_warnings(str(interaction.user.id))
-    if not warnings:
-        embed = discord.Embed(title="User Moderation History", description="This menu is where you can view your past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
-        return await interaction.followup.send(embed=embed, ephemeral=True)
-
-    active  = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
-    revoked = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() == "TRUE"]
-    embed = discord.Embed(title="User Moderation History", description="This menu is where you can view your past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
-
-    if active:
-        txt = ""
-        for r, _ in active: txt += f"▪️ ID: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Source: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
-        embed.add_field(name=f"🟢 Active Records ({len(active)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-    if revoked:
-        txt = ""
-        for r, _ in revoked: txt += f"▪️ ID: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | {r[COL_REASON]} (Revoked)\n"
-        embed.add_field(name=f"⚪ Historical Archive ({len(revoked)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user")
-@app_commands.describe(user="The user to look up")
-async def viewwarnings(interaction: discord.Interaction, user: discord.Member):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-    await interaction.response.defer(ephemeral=True)
-    warnings = get_user_warnings(str(user.id))
-    if not warnings:
-        embed = discord.Embed(title=f"User Log File — {user.display_name}", description="This menu is where you can view all past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
-        return await interaction.followup.send(embed=embed, ephemeral=True)
-
-    active  = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
-    revoked = [(r, n) for r, n in warnings if pad(r)[COL_REVOKED].upper() == "TRUE"]
-    embed = discord.Embed(title=f"User Log File — {user.display_name}", description="This menu is where you can view all past and current moderation history.", color=discord.Color.from_rgb(44, 62, 80))
-    embed.set_thumbnail(url=user.display_avatar.url)
-
-    if active:
-        txt = ""
-        for r, _ in active: txt += f"▪️ Case: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Source: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
-        embed.add_field(name=f"🟢 Active Records ({len(active)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-    if revoked:
-        txt = ""
-        for r, _ in revoked: txt += f"▪️ Case: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | {r[COL_REASON]} (Revoked)\n"
-        embed.add_field(name=f"⚪ Historical Archive ({len(revoked)})", value=f"```text\n{txt.strip()}\n```", inline=False)
-    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ── Production Flask Engine Server ─────────────────────────────────────────────
 app = Flask(__name__)
