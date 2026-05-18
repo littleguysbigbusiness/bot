@@ -21,15 +21,14 @@ STATIC_STATUS_ID  = 1505559844449419284
 APPEAL_CHANNEL_ID = 1420690312531017850  
 
 # Your official application link assets
-GOOGLE_APPEAL_FORM_URL = "https://forms.gle/cKRQXxpHKYgV8GZ37" # <-- Swap with your actual Google Form link later!
+GOOGLE_APPEAL_FORM_URL = "https://forms.google.com" 
 
-SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
-SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+# Scale endpoints to 16 columns (A:P) to include the new role database column
+SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:P"
+SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:P:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
 
-ROLES_BACKUP_FILE = "suspended_roles.json"
-
-# Column indices
+# Column indices matching your spreadsheet (A to P layout)
 COL_USER_ID     = 0
 COL_USERNAME    = 1
 COL_ISSUED_BY   = 2
@@ -45,6 +44,7 @@ COL_RESTRICTION = 11
 COL_START_DATE  = 12
 COL_END_DATE    = 13
 COL_ALT_INC_ID  = 14
+COL_BACKUP_ROLES = 15  # Column P: Stores comma-separated staff role IDs
 
 # ── Google Service Account Authentication ─────────────────────────────────────
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -66,7 +66,7 @@ def sheets_headers():
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 # ── Sheets helpers ─────────────────────────────────────────────────────────────
-def pad(row, length=15):
+def pad(row, length=16):
     return list(row) + [""] * (length - len(row))
 
 def read_all_rows():
@@ -80,13 +80,13 @@ def read_all_rows():
 
 def append_row(row):
     try:
-        requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+        requests.post(SHEVE_APPEND_URL if 'SHEVE_APPEND_URL' in locals() else SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
     except Exception as e:
         print(f"[Sheets] Append error: {e}")
 
 def update_row(row_index, row):
     try:
-        range_str = f"{SHEET_NAME}!A{row_index}:O{row_index}"
+        range_str = f"{SHEET_NAME}!A{row_index}:P{row_index}"
         url = f"{SHEET_UPDATE_BASE}{range_str}?valueInputOption=RAW"
         requests.put(url, headers=sheets_headers(), json={"values": [row]}, timeout=10)
     except Exception as e:
@@ -106,32 +106,6 @@ def get_user_warnings(user_id):
         if row[COL_USER_ID].strip() == str(user_id).strip():
             results.append((row, i + 2))
     return results
-
-# ── Roles JSON Backup Helpers ──────────────────────────────────────────────────
-def save_suspended_roles(user_id, role_ids):
-    data = {}
-    if os.path.exists(ROLES_BACKUP_FILE):
-        try:
-            with open(ROLES_BACKUP_FILE, "r") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-    data[str(user_id)] = role_ids
-    with open(ROLES_BACKUP_FILE, "w") as f:
-        json.dump(data, f)
-
-def pop_suspended_roles(user_id):
-    if not os.path.exists(ROLES_BACKUP_FILE):
-        return []
-    try:
-        with open(ROLES_BACKUP_FILE, "r") as f:
-            data = json.load(f)
-        role_ids = data.pop(str(user_id), [])
-        with open(ROLES_BACKUP_FILE, "w") as f:
-            json.dump(data, f)
-        return role_ids
-    except Exception:
-        return []
 
 # ── Status Page ────────────────────────────────────────────────────────────────
 STATUS_EMOJI = {"operational": "✅", "degraded_performance": "🟨", "partial_outage": "🟧", "major_outage": "🔴", "under_maintenance": "🔵", "unknown": "⬜"}
@@ -202,7 +176,7 @@ async def update_status_embed():
 
 # ── Interactive Appeal System Elements ───────────────────────────────────────
 class AppealReasonModal(discord.ui.Modal, title="Submit Case File Appeal"):
-    appeal_reason = discord.ui.TextInput(label="Why should this infraction be removed?", style=discord.TextStyle.paragraph, placeholder="Provide clean operational context or evidence for review...", required=True, max_length=500)
+    appeal_reason = discord.ui.TextInput(label="Why should this infraction be removed?", style=discord.TextStyle.paragraph, placeholder="Provide clean context or evidence for review...", required=True, max_length=500)
 
     def __init__(self, case_id, original_reason, restriction_type):
         super().__init__()
@@ -226,7 +200,7 @@ class AppealReasonModal(discord.ui.Modal, title="Submit Case File Appeal"):
         review_embed.timestamp = datetime.datetime.utcnow()
 
         await review_channel.send(embed=review_embed, view=AppealReviewButtons())
-        await interaction.followup.send("✅ **Success!** Your system appeal file has been dispatched to corporate administration for active review.", ephemeral=True)
+        await interaction.followup.send("✅ **Success!** Your appeal has been sent to administration for review.", ephemeral=True)
 
 class AppealDropdownMenu(discord.ui.Select):
     def __init__(self, user_active_cases):
@@ -241,8 +215,7 @@ class AppealDropdownMenu(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         case_id = self.values[0]
         row, _ = find_warning_by_id(case_id)
-        if not row:
-            return await interaction.response.send_message("❌ Case resolved or moved.", ephemeral=True)
+        if not row: return await interaction.response.send_message("❌ Case resolved or moved.", ephemeral=True)
         await interaction.response.send_modal(AppealReasonModal(case_id, row[COL_REASON], row[COL_RESTRICTION]))
 
 class AppealDropdownView(discord.ui.View):
@@ -264,6 +237,7 @@ class AppealReviewButtons(discord.ui.View):
 
         row, sheet_row = find_warning_by_id(case_id)
         if row and row[COL_REVOKED].strip().upper() != "TRUE":
+            # Direct API punishment lifting with automatic role restoration read from the sheet!
             await execute_live_punishment_revocation(interaction.guild, row, str(interaction.user))
             row[COL_REVOKED]    = "TRUE"
             row[COL_REVOKED_BY] = f"Appeal Appr: {interaction.user}"
@@ -272,7 +246,7 @@ class AppealReviewButtons(discord.ui.View):
 
         try:
             target_user = await bot.fetch_user(appellant_id)
-            await target_user.send(embed=discord.Embed(title="✅ Appeal Approved", description=f"Your appeal for Case ID `{case_id}` has been accepted. The infraction and its associated restrictions have been lifted.", color=discord.Color.green()))
+            await target_user.send(embed=discord.Embed(title="✅ Appeal Approved", description=f"Your appeal for Case ID `{case_id}` has been accepted. Your restrictions and original staff roles have been restored.", color=discord.Color.green()))
         except Exception: pass
 
         embed.color, embed.title = discord.Color.green(), "✅ Appeal Cleared & Approved"
@@ -296,14 +270,13 @@ class AppealReviewButtons(discord.ui.View):
         embed.set_footer(text=f"Rejected upon review by {interaction.user}")
         await interaction.message.edit(embed=embed, view=None)
 
-# ── Automated Active Penalty Lift Engine ───────────────────────────────────────
+# ── Automated Active Penalty Lift Engine (Reads Directly From Spreadsheet) ──────
 async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_name: str) -> str:
     uid = int(row[COL_USER_ID].strip())
     rest_type = row[COL_RESTRICTION].strip()
     source_context = row[COL_SOURCE].strip()
 
-    if source_context != "Discord":
-        return "Logged to Sheet (In-Game Context)"
+    if source_context != "Discord": return "Logged to Sheet (In-Game Context)"
 
     if rest_type == "Timeout":
         try:
@@ -320,45 +293,41 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
         except Exception as e: return f"API Unban execution failed: {e}"
 
     elif rest_type == "Staff Suspension":
-        saved_ids = pop_suspended_roles(uid)
-        if not saved_ids: return "Staff Suspension lifted (No backups found)"
+        # Pulls the raw comma-separated text string straight from Column P of your sheet!
+        raw_roles = row[COL_BACKUP_ROLES].strip()
+        if not raw_roles: return "Staff Suspension lifted (No spreadsheet backup roles stored)"
+        
         try:
             member = await guild.fetch_member(uid)
             if member:
                 restored = 0
-                for r_id in saved_ids:
+                # Splits the cell text back into individual numeric role IDs
+                role_ids = [int(r.strip()) for r in raw_roles.split(",") if r.strip().isdigit()]
+                for r_id in role_ids:
                     role = guild.get_role(r_id)
                     if role:
                         try: await member.add_roles(role); restored += 1
                         except Exception: pass
-                return f"Staff Suspension lifted ({restored} roles restored)"
+                return f"Staff Suspension lifted ({restored} spreadsheet roles restored)"
         except Exception as e: return f"Staff Suspension role allocation error: {e}"
 
     return "Database trail flagged"
 
-# ── Universal Action Master Engine ─────────────────────────────────────────────
-async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, final_expiry: str, duration_delta: datetime.timedelta = None):
+# ── Universal Action Master Engine (Saves Backup Roles to Spreadsheet) ─────────
+async def run_moderation_action(interaction: discord.Interaction, user: discord.Member, reason: str, restriction_type: str, source: str, final_expiry: str, duration_delta: datetime.timedelta = None, backup_roles_str: str = "") -> str:
     warning_id = str(uuid.uuid4())[:8].upper()
     timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     start_date = timestamp[:10]
 
     # 1. GENERATE THE SECURE CONTEXT EMBED CARD SYSTEM
-    dm_embed = discord.Embed(
-        title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", 
-        description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", 
-        color=discord.Color.from_rgb(44, 62, 80)
-    )
+    dm_embed = discord.Embed(title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}", description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.", color=discord.Color.from_rgb(44, 62, 80))
     dm_embed.add_field(name="📋 Infraction Type", value=restriction_type, inline=True)
     dm_embed.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
     dm_embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     dm_embed.add_field(name="Platform context", value=source, inline=True)
     dm_embed.add_field(name="Expiration Date", value=final_expiry, inline=True)
     
-    form_instructions = (
-        "If you are banned or restricted from server channels and cannot submit an in-app `/appeal`, "
-        f"you may lodge an external case evaluation request via our primary appeal form:\n"
-        f"📋 **[Click Here to Open Google Appeal Form]({GOOGLE_APPEAL_FORM_URL})**"
-    )
+    form_instructions = f"If you are banned or restricted from server channels and cannot submit an in-app `/appeal`, you may lodge an external case evaluation request via our primary appeal form:\n📋 **[Click Here to Open Google Appeal Form]({GOOGLE_APPEAL_FORM_URL})**"
     dm_embed.add_field(name="⚖️ External Appeal Request Notice", value=form_instructions, inline=False)
     dm_embed.set_footer(text="Automated Compliance Engine • Busways Administration")
     dm_embed.timestamp = datetime.datetime.utcnow()
@@ -375,17 +344,17 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
                 await user.timeout(duration_delta, reason=reason)
                 execution_notes = f"Timed out natively until UTC timestamp"
             except Exception as e: execution_notes = f"Logged (Timeout API call failed: {e})"
-
         elif restriction_type == "Ban":
             try:
                 await user.ban(delete_message_days=1, reason=reason)
                 execution_notes = "Banned cleanly from guild instance"
             except Exception as e: execution_notes = f"Logged (API Ban execution failed: {e})"
 
-    # 4. LOG ENTRY TRANSACTION TO SPREADSHEET ROW BACKUP
+    # 4. LOG ENTRY TRANSACTION TO SPREADSHEET ROW BACKUP (A to P matching array)
     append_row([
         str(user.id), str(user), str(interaction.user), str(interaction.user.id),
-        reason, timestamp, warning_id, "FALSE", "", "", source, restriction_type, start_date, final_expiry, warning_id
+        reason, timestamp, warning_id, "FALSE", "", "", source, restriction_type, start_date, final_expiry, warning_id,
+        backup_roles_str  # Writes the comma-separated role list directly to Column P!
     ])
 
     embed = discord.Embed(title=f"🛑 User Log Added ({restriction_type})", description=f"A formal {restriction_type.lower()} record has been generated and securely logged to the central database.", color=discord.Color.from_rgb(44, 62, 80))
@@ -407,7 +376,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
 @bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and instantly lift its punishment")
 @app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
 async def revokeaction(interaction: discord.Interaction, case_id: str):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", inline=True)
+    if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
     row, sheet_row = find_warning_by_id(case_id)
     if row is None: return await interaction.followup.send(f"❌ Case ID `{case_id}` not found on database sheet.")
@@ -481,7 +450,6 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
-# ── Moderation Commands ────────────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
 @app_commands.describe(user="The user to warn", reason="Reason for the warning", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
@@ -509,23 +477,16 @@ async def issuewarning(interaction: discord.Interaction, user: discord.Member, r
 async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, reason: str, duration_amount: int, duration_unit: app_commands.Choice[str], source: app_commands.Choice[str] = None):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer()
-    
-    if duration_amount <= 0:
-        await interaction.followup.send("❌ **Error:** Duration amount value must be a positive integer.")
-        return
+    if duration_amount <= 0: return await interaction.followup.send("❌ **Error:** Duration must be a positive number.")
 
-    # Calculate exact delta duration mapping parameters
     unit = duration_unit.value
     if unit == "minutes": delta = datetime.timedelta(minutes=duration_amount)
     elif unit == "hours": delta = datetime.timedelta(hours=duration_amount)
     else: delta = datetime.timedelta(days=duration_amount)
 
-    # Convert directly to full structural UTC target stamp configuration formats
     expiry_time = datetime.datetime.utcnow() + delta
     final_expiry_stamp = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-    final_source = source.value if source else "Discord"
-
-    await run_moderation_action(interaction, user, reason, "Timeout", final_source, final_expiry_stamp, duration_delta=delta)
+    await run_moderation_action(interaction, user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, duration_delta=delta)
 
 @bot.tree.command(name="ban", description="[Admin] Ban a user natively from the server and log to sheet")
 @app_commands.describe(user="The user to ban", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
@@ -536,7 +497,7 @@ async def ban_cmd(interaction: discord.Interaction, user: discord.Member, reason
     expiry = end_date if end_date else "Never"
     await run_moderation_action(interaction, user, reason, "Ban", source.value if source else "Discord", expiry)
 
-@bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and strip roles")
+@bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and save role backups directly to Google Sheet")
 @app_commands.describe(user="The staff member", reason="Reason for suspension", source="Platform context", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
 async def staff_suspension(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str, source: app_commands.Choice[str] = None):
@@ -545,15 +506,20 @@ async def staff_suspension(interaction: discord.Interaction, user: discord.Membe
     try: datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
     except ValueError: return await interaction.followup.send("❌ **Error:** Expiry date format required: `YYYY-MM-DD`")
 
-    role_ids = [r.id for r in user.roles if r.name != "@everyone" and not r.managed]
-    save_suspended_roles(user.id, role_ids)
+    # Capture all existing eligible role IDs and join them with commas
+    role_ids = [str(r.id) for r in user.roles if r.name != "@everyone" and not r.managed]
+    backup_roles_str = ",".join(role_ids)
+
+    # Strip roles natively from the user profile
     for role in user.roles:
         if role.name != "@everyone" and not role.managed:
             try: await user.remove_roles(role)
             except Exception: pass
-    await run_moderation_action(interaction, user, reason, "Staff Suspension", source.value if source else "Discord", end_date)
+            
+    # Send transaction to master action engine to execute logging
+    await run_moderation_action(interaction, user, reason, "Staff Suspension", source.value if source else "Discord", end_date, backup_roles_str=backup_roles_str)
 
-# ── Role Restoration Logic ─────────────────────────────────────────────────────
+# ── Role Restoration Logic (Reads Directly From Spreadsheet) ───────────────────
 @bot.tree.command(name="restoreroles", description="Restore original roles if your suspension has expired")
 async def restoreroles(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -571,11 +537,12 @@ async def restoreroles(interaction: discord.Interaction):
             return await interaction.followup.send(f"⏳ Suspension active until `{expiry_str}`.", ephemeral=True)
     except ValueError: return await interaction.followup.send("❌ Format corrupted on sheet.", ephemeral=True)
 
-    saved_ids = pop_suspended_roles(user_id)
-    if not saved_ids: return await interaction.followup.send("⚠️ Backup file missing.", ephemeral=True)
+    raw_roles = active_suspension[COL_BACKUP_ROLES].strip()
+    if not raw_roles: return await interaction.followup.send("⚠️ No backup roles found inside your spreadsheet file row.", ephemeral=True)
 
     restored = 0
-    for r_id in saved_ids:
+    role_ids = [int(r.strip()) for r in raw_roles.split(",") if r.strip().isdigit()]
+    for r_id in role_ids:
         role = interaction.guild.get_role(r_id)
         if role:
             try: await interaction.user.add_roles(role); restored += 1
@@ -587,7 +554,7 @@ async def restoreroles(interaction: discord.Interaction):
             r_padded[COL_REVOKED], r_padded[COL_REVOKED_BY], r_padded[COL_REVOKED_AT] = "TRUE", "System Auto-Restore", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             update_row(idx, r_padded)
             break
-    await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly.", ephemeral=True)
+    await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly from spreadsheet backup.", ephemeral=True)
 
 @bot.tree.command(name="viewmywarnings", description="View all your warnings (private)")
 async def viewmywarnings(interaction: discord.Interaction):
