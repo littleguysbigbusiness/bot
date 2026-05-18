@@ -21,7 +21,7 @@ STATIC_STATUS_ID  = 1505559844449419284
 APPEAL_CHANNEL_ID = 1420690312531017850  
 
 # Your official application link assets
-GOOGLE_APPEAL_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLScOXFE24Bz7jGiNT4kn02FLiADibivHIxREyXGY2rvQxACG-A/viewform?usp=dialog" 
+GOOGLE_APPEAL_FORM_URL = "https://forms.google.com" 
 
 # Scale endpoints to 16 columns (A:P) to include the role database column
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:P"
@@ -60,7 +60,7 @@ PROTECTED_ROLE_NAMES = [
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 creds = None
 
-# 🛰️ Dynamic routing check updates to search Render's system secret directory mount path first!
+# Dynamic routing check updates to search Render's system secret directory mount path first!
 SECRET_FILE_PATH = "/etc/secrets/service_account.json"
 ALTERNATIVE_PATH = "service_account.json"
 
@@ -480,7 +480,7 @@ def compile_split_warnings_embed(embed, warnings):
         is_revoked = padded[COL_REVOKED].strip().upper() == "TRUE"
         src = padded[COL_SOURCE].strip().lower()
         
-        case_text = f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION]}\n  Reason: {padded[COL_REASON]}\n  Issued: {padded[COL_TIMESTAMP][:10]} | Expires: {padded[COL_END_DATE]}\n\n"
+        case_text = f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION] if COL_RESTRICTION < len(padded) else 'Warning'}\n  Reason: {padded[COL_REASON]}\n  Issued: {padded[COL_TIMESTAMP][:10]} | Expires: {padded[COL_END_DATE]}\n\n"
         
         if is_revoked:
             revoked_list.append(f"▪️ Case: {padded[COL_INCIDENT_ID]} | Type: {padded[COL_RESTRICTION]} (Revoked)\n")
