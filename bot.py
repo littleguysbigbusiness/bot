@@ -439,6 +439,45 @@ async def run_moderation_action(interaction: discord.Interaction, target_id: str
     
     await interaction.followup.send(embed=embed)
 
+# ── Display Layout Processing Engine ───────────────────────────────────────────
+def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_url: str = None) -> discord.Embed:
+    """Builds a formatted historical record layout, splitting active logs from revoked trails cleanly."""
+    embed = discord.Embed(title=title_text, color=discord.Color.from_rgb(44, 62, 80))
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
+
+    active_txt = ""
+    revoked_txt = ""
+
+    for r, _ in warnings_list:
+        case_id = r[COL_INCIDENT_ID].strip()
+        rest_type = r[COL_RESTRICTION].strip()
+        context = r[COL_SOURCE].strip()
+        reason = r[COL_REASON].strip()
+        issued = r[COL_TIMESTAMP][:10]
+        expires = r[COL_END_DATE].strip()
+        is_revoked = r[COL_REVOKED].strip().upper() == "TRUE"
+
+        log_block = f"▪ Case ID: {case_id} | Type: {rest_type} | Context: {context}\n  Reason: {reason}\n  Issued: {issued} | Expires: {expires}\n"
+        
+        if is_revoked:
+            revoked_by = r[COL_REVOKED_BY].strip()
+            log_block += f"  ❌ REVOKED BY: {revoked_by}\n\n"
+            revoked_txt += log_block
+        else:
+            log_block += "\n"
+            active_txt += log_block
+
+    if not active_txt:
+        active_txt = "No active infractions registered against this profile.\n"
+    if not revoked_txt:
+        revoked_txt = "No historical logs have been revoked or cleared.\n"
+
+    embed.add_field(name="⚠️ Active Infractions & Restrictions", value=f"```text\n{active_txt.strip()}\n```", inline=False)
+    embed.add_field(name="✅ Historical Archive (Revoked/Cleared Logs)", value=f"```text\n{revoked_txt.strip()}\n```", inline=False)
+    embed.timestamp = datetime.datetime.utcnow()
+    return embed
+
 # ── Slash Commands ─────────────────────────────────────────────────────────────
 @bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and instantly lift its punishment")
 @app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
@@ -523,22 +562,11 @@ async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     user_id = str(interaction.user.id)
     warnings = get_user_warnings(user_id)
-    embed = discord.Embed(title="User Moderation History", description="Your logs are categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
     
-    if not warnings:
-        embed.add_field(name="📋 Record Status", value="```text\nNo records found. Thank you for abiding by the rules!\n```", inline=False)
-        return await interaction.followup.send(embed=embed, ephemeral=True)
-        
-    txt = ""
-    for r, _ in warnings:
-        txt += f"▪ McKay: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Context: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
-        
-    embed.add_field(name=f"📊 Your Cataloged History Files ({len(warnings)})", value=f"```text\n{txt.strip()}\n```", inline=False)
+    embed = build_historical_log_embed("👤 Your Personal Compliance History", warnings, interaction.user.display_avatar.url)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
-# 🚀 HYBRID DATA LOOKUP UPGRADE: Accepts raw text strings, tags, or mentions cleanly!
-@bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user using an ID or a standard Mention")
+@bot.tree.command(name="viewwarnings", description="[Admin] View warnings for any user split by platform")
 @app_commands.describe(user_target="The numerical ID string or @mention of the target user profile")
 async def viewwarnings(interaction: discord.Interaction, user_target: str):
     if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
@@ -547,16 +575,18 @@ async def viewwarnings(interaction: discord.Interaction, user_target: str):
     cleaned_id = extract_id(user_target)
     warnings = get_user_warnings(cleaned_id)
     
-    embed = discord.Embed(title=f"User Log File — Database Search Results", description=f"Displaying data array matching target layout identifier: `{cleaned_id}`", color=discord.Color.from_rgb(44, 62, 80))
-    if not warnings:
-        embed.add_field(name="📋 Record Status", value="```text\nNo tracking rows matched this target account identifier inside our system records.\n```", inline=False)
-        return await interaction.followup.send(embed=embed)
-        
-    txt = ""
-    for r, _ in warnings:
-        txt += f"▪ McKay: {r[COL_INCIDENT_ID]} | Type: {r[COL_RESTRICTION]} | Context: {r[COL_SOURCE]}\n  Reason: {r[COL_REASON]}\n  Issued: {r[COL_TIMESTAMP][:10]} | Expires: {r[COL_END_DATE]}\n\n"
-        
-    embed.add_field(name=f"📊 Cataloged History Files ({len(warnings)})", value=f"```text\n{txt.strip()}\n```", inline=False)
+    # Attempt to grab avatar for clean embed display layout styling
+    thumb = None
+    try:
+        member = await interaction.guild.fetch_member(int(cleaned_id))
+        if member: thumb = member.display_avatar.url
+    except Exception:
+        try:
+            u_obj = await bot.fetch_user(int(cleaned_id))
+            if u_obj: thumb = u_obj.display_avatar.url
+        except Exception: pass
+
+    embed = build_historical_log_embed(f"📋 Historical Audit File: {cleaned_id}", warnings, thumb)
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="warn", description="[Admin] Issue a warning to a user")
@@ -595,7 +625,6 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
     final_expiry_stamp = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     await run_moderation_action(interaction, str(user.id), str(user), user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, timeout_duration=delta)
 
-# 🔨 HYBRID UNIVERSAL BAN UPGRADE: Force bans any raw text ID string OR regular server mention!
 @bot.tree.command(name="ban", description="[Admin] Ban a user from the server using their ID string or standard Mention")
 @app_commands.describe(user_target="The 18-digit numerical ID or mention of the user to terminate", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
@@ -604,8 +633,6 @@ async def ban_cmd(interaction: discord.Interaction, user_target: str, reason: st
     await interaction.response.defer()
     
     cleaned_id = extract_id(user_target)
-    
-    # Check if user object lives inside your active server guild cache
     target_member = None
     target_name = f"User_ID_{cleaned_id}"
     try:
