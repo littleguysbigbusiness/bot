@@ -495,15 +495,3 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
             # Strip trailing/leading backticks if staff pastes it inside a markdown block container
             clean_json = embed_json.strip()
             if clean_json.startswith("
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
-http://googleusercontent.com/immersive_entry_chip/2
-
----
-
-### 🚀 Code Commitment and Sync Execution Steps
-1. Paste this updated configuration block into your **`bot.py`** file on GitHub.
-2. Go to Render and trigger a manual **Clear build cache & deploy**.
-3. Once the build deployment registers green, press **`CTRL` + `R`** in your Discord application client window to forcefully pull the updated slash command dictionary.
-
-Your team can now run `/send_message` from any text channel! Let me know if you run into any formatting quirks while messing with the JSON inputs.
