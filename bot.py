@@ -17,9 +17,8 @@ STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505808587807789117  
 APPEAL_CHANNEL_ID = 1505891264032149574  
-GUILD_ID          = 1420689408226496522  
 
-# Your official appeal assets
+# Your official application appeal assets
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
@@ -43,7 +42,7 @@ COL_SOURCE      = 10
 COL_RESTRICTION = 11
 COL_START_DATE  = 12
 COL_END_DATE    = 13
-# Column N holds expiration, Column O holds the lookup key
+COL_ALT_INC_ID  = 14
 
 # Explicitly protected role names: IMMUNE to getting stripped!
 PROTECTED_ROLE_NAMES = [
@@ -62,7 +61,6 @@ from google.auth.transport.requests import Request
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 creds = None
 
-# Looks directly at the /etc/secrets directory layout from your environment screenshot!
 SECRET_FILE_PATH = "/etc/secrets/service_account.json"
 ALTERNATIVE_PATH = "service_account.json"
 TARGET_PATH = SECRET_FILE_PATH if os.path.exists(SECRET_FILE_PATH) else ALTERNATIVE_PATH
@@ -196,12 +194,9 @@ class WarningsBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
     async def setup_hook(self):
         self.add_view(AppealReviewButtons())
-        
-        # ⚡ Completely clears out old cached layouts from Discord's cloud registry!
-        target_guild = discord.Object(id=GUILD_ID)
-        self.tree.copy_global_to(guild=target_guild)
-        await self.tree.sync(guild=target_guild)
-        print("✅ Commands locked directly to Server Guild Instance.")
+        # 🟢 BACK TO HOW IT WAS: Restored to standard global sync tracking framework
+        await self.tree.sync()
+        print("✅ Slash commands synced globally.")
 
     async def on_ready(self):
         print(f"✅ Logged in as {self.user}")
@@ -384,7 +379,7 @@ async def run_moderation_action(interaction: discord.Interaction, user: discord.
     roblox_username = user.nick if user.nick else user.display_name
     execution_notes = "Logged to Database"
 
-    # Pre-dispatch DM card notification BEFORE enforcement action takes place
+    # Pre-dispatch DM notice card BEFORE running the action loop
     dm_embed = discord.Embed(
         title=f"⚠️ Account Moderation Notice: {restriction_type.upper()}",
         description=f"A formal system action has been registered against your account profile inside **{interaction.guild.name}** due to a rules violation.",
@@ -520,7 +515,6 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
-# Clean, automated parameter definition
 @bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
