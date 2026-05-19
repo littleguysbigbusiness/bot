@@ -8,6 +8,7 @@ import requests
 import threading
 import json
 import re
+import asyncio
 from flask import Flask
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -206,6 +207,9 @@ class WarningsBot(commands.Bot):
         print(f"✅ Logged in as {self.user}")
         if not update_status_embed.is_running():
             update_status_embed.start()
+        # 🚀 Starts your automated background loop worker here!
+        if not automatic_expiry_sweeper.is_running():
+            automatic_expiry_sweeper.start()
 
 bot = WarningsBot()
 
@@ -233,6 +237,66 @@ async def update_status_embed():
                 await msg.edit(embed=embed)
             except Exception: pass
     except Exception: pass
+
+# ── Automated Background Expiry Engine (Runs Daily) ───────────────────────────
+@tasks.loop(hours=24)
+async def automatic_expiry_sweeper():
+    """Loops database sheets dynamically, looking for expired punishments to lift cleanly."""
+    print("[Sweeper] Starting automated infraction expiration analysis...")
+    rows = read_all_rows()
+    if not rows:
+        return
+
+    now = datetime.datetime.utcnow()
+    current_date = now.date()
+
+    for idx, raw_row in enumerate(rows):
+        row = pad(raw_row)
+        user_id_str = row[COL_USER_ID].strip()
+        is_revoked = row[COL_REVOKED].strip().upper() == "TRUE"
+        restriction_type = row[COL_RESTRICTION].strip()
+        expiry_str = row[COL_END_DATE].strip()
+
+        # Isolate rows containing unrevoked punishments with dates assigned
+        if is_revoked or not user_id_str or expiry_str in ("Never", "", "None"):
+            continue
+
+        try:
+            # Check standard date syntax formatting boundary (YYYY-MM-DD)
+            clean_date_str = expiry_str.split(" ")[0].strip()
+            expiry_date = datetime.datetime.strptime(clean_date_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        # Check if the restriction has reached or passed its targeted duration limit
+        if current_date >= expiry_date:
+            print(f"[Sweeper] Processing automatic termination for User ID: {user_id_str} [{restriction_type}]")
+            
+            # Loop through all bot-connected servers to lift enforcement natively
+            for guild in bot.guilds:
+                if restriction_type == "Ban":
+                    try:
+                        await guild.unban(discord.Object(id=int(user_id_str)), reason="System Auto-Expiry: Temporal duration limit exceeded.")
+                        print(f"[Sweeper] Successfully unbanned ID {user_id_str} from server instance.")
+                    except Exception as e:
+                        print(f"[Sweeper] Failed to auto-unban {user_id_str}: {e}")
+                
+                elif restriction_type == "Timeout":
+                    try:
+                        member = await guild.fetch_member(int(user_id_str))
+                        if member:
+                            await member.timeout(None, reason="System Auto-Expiry: Temporal duration limit exceeded.")
+                            print(f"[Sweeper] Successfully unmuted ID {user_id_str}.")
+                    except Exception: pass
+
+            # Update Google Sheet row records to reflect system intervention status flags
+            row[COL_REVOKED] = "TRUE"
+            row[COL_REVOKED_BY] = "System Auto-Expiry"
+            row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            update_row(idx + 2, row)
+            
+            # Small delay to keep the bot clear of Google API read/write throttling limits
+            await asyncio.sleep(1)
 
 # ── Interactive Appeal System Views ───────────────────────────────────────────
 class AppealReasonModal(discord.ui.Modal, title="Submit Case File Appeal"):
@@ -492,7 +556,6 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
     target_embed = None
     if embed_json:
         try:
-            # Strip trailing/leading backticks if staff pastes it inside a markdown block container
             clean_json = embed_json.strip()
             if clean_json.startswith("`" + "`" + "`json"): clean_json = clean_json[7:]
             elif clean_json.startswith("`" + "`" + "`"): clean_json = clean_json[3:]
@@ -680,7 +743,9 @@ async def ban_cmd(interaction: discord.Interaction, user_target: str, reason: st
             if user_obj: target_name = str(user_obj)
         except Exception: pass
 
-    await run_moderation_action(interaction, cleaned_id, target_name, target_member, reason, "Ban", source.value if source else "Discord", end_date)
+    # Hand off standard temporal data formats (YYYY-MM-DD) natively
+    clean_end_date = end_date.strip() if end_date else "Never"
+    await run_moderation_action(interaction, cleaned_id, target_name, target_member, reason, "Ban", source.value if source else "Discord", clean_end_date)
 
 @bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and strip non-protected roles")
 @app_commands.describe(user="The staff member profile", reason="Reason for suspension", source="Platform context", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
@@ -744,8 +809,6 @@ def home(): return "BWR7 Warnings Bot is Online Framework Stable!", 200
 def run_discord_bot():
     if not DISCORD_TOKEN: return
     import asyncio
-    # Initialize a clean, isolated event loop on this background thread 
-    # to avoid signal conflicts with the Gunicorn main WSGI thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -761,12 +824,9 @@ def run_discord_bot():
 
 # ── Adaptive Deployment Environment Detection (Prevents Port Collisions) ───────
 if __name__ != "__main__":
-    # GUNICORN WSGI DETECTED: Gunicorn handles port binding and serves Flask natively.
-    # We ONLY boot up our background Discord connection thread.
     print("🛰️ WSGI/Gunicorn environment detected. Launching background bot worker...")
     threading.Thread(target=run_discord_bot, daemon=True).start()
 else:
-    # LOCAL/DIRECT EXECUTION: Spin up Flask server manually alongside the Discord worker.
     print("🛰️ Direct script execution detected. Initializing Flask development engine...")
     threading.Thread(target=run_discord_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
