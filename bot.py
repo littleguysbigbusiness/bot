@@ -17,9 +17,9 @@ STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505808587807789117  
 APPEAL_CHANNEL_ID = 1505891264032149574  
-GUILD_ID          = 1420689408226496522  # 🚀 Your exact server ID locked in for instant tree updates
+GUILD_ID          = 1420689408226496522  
 
-# Your official application link assets
+# Your official appeal assets
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
@@ -43,7 +43,7 @@ COL_SOURCE      = 10
 COL_RESTRICTION = 11
 COL_START_DATE  = 12
 COL_END_DATE    = 13
-COL_ALT_INC_ID  = 14
+# Column N holds expiration, Column O holds the lookup key
 
 # Explicitly protected role names: IMMUNE to getting stripped!
 PROTECTED_ROLE_NAMES = [
@@ -55,17 +55,26 @@ PROTECTED_ROLE_NAMES = [
     "Tickets v2", "BD Department", "BM Department"
 ]
 
-# ── Google Authentication ──────────────────────────────────────────────────────
+# ── Google Authentication (Render Secret Directory Path Alignment) ────────────
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 creds = None
 
-if os.path.exists("service_account.json"):
-    creds = service_account.Credentials.from_service_account_file(
-        "service_account.json", scopes=SCOPES
-    )
+# Looks directly at the /etc/secrets directory layout from your environment screenshot!
+SECRET_FILE_PATH = "/etc/secrets/service_account.json"
+ALTERNATIVE_PATH = "service_account.json"
+TARGET_PATH = SECRET_FILE_PATH if os.path.exists(SECRET_FILE_PATH) else ALTERNATIVE_PATH
+
+if os.path.exists(TARGET_PATH):
+    try:
+        creds = service_account.Credentials.from_service_account_file(TARGET_PATH, scopes=SCOPES)
+        print(f"✅ Google Sheets engine connected using file path: {TARGET_PATH}")
+    except Exception as e:
+        print(f"❌ Credentials parsing issue: {e}")
+else:
+    print("⚠️ Warning: service_account.json missing from environment entirely!")
 
 def sheets_headers():
     global creds
@@ -187,11 +196,13 @@ class WarningsBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
     async def setup_hook(self):
         self.add_view(AppealReviewButtons())
-        # ⚡ Sync directly to your server ID to force immediate, live layout overrides!
+        
+        # ⚡ Completely clears out old cached layouts from Discord's cloud registry!
         target_guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=target_guild)
         await self.tree.sync(guild=target_guild)
-        print("✅ Slash commands forced to specific server layout instantly.")
+        print("✅ Commands locked directly to Server Guild Instance.")
+
     async def on_ready(self):
         print(f"✅ Logged in as {self.user}")
         if not update_status_embed.is_running():
@@ -509,6 +520,7 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
+# Clean, automated parameter definition
 @bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
