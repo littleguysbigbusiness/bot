@@ -17,6 +17,7 @@ STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505808587807789117  
 APPEAL_CHANNEL_ID = 1505891264032149574  
+GUILD_ID          = 1420689408226496522  # 🚀 Your exact server ID locked in for instant tree updates
 
 # Your official application link assets
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
@@ -186,8 +187,11 @@ class WarningsBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
     async def setup_hook(self):
         self.add_view(AppealReviewButtons())
-        await self.tree.sync()
-        print("✅ Slash commands synced globally.")
+        # ⚡ Sync directly to your server ID to force immediate, live layout overrides!
+        target_guild = discord.Object(id=GUILD_ID)
+        self.tree.copy_global_to(guild=target_guild)
+        await self.tree.sync(guild=target_guild)
+        print("✅ Slash commands forced to specific server layout instantly.")
     async def on_ready(self):
         print(f"✅ Logged in as {self.user}")
         if not update_status_embed.is_running():
@@ -443,7 +447,7 @@ async def revokeaction(interaction: discord.Interaction, case_id: str):
     row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     update_row(sheet_row, row)
 
-    embed = discord.Embed(title="✅ Universal Revoke Executed", color=discord.Color.from_rgb(39, 174, 96))
+    embed = discord.Embed(title="Universal Revoke Executed", color=discord.Color.from_rgb(39, 174, 96))
     embed.add_field(name="Case ID", value=f"`{case_id}`", inline=True)
     embed.add_field(name="User Target", value=f"<@{row[COL_USER_ID]}>", inline=True)
     embed.add_field(name="Action Type Lifted", value=f"**{row[COL_RESTRICTION]}**", inline=True)
@@ -505,12 +509,9 @@ async def appeal(interaction: discord.Interaction):
     if not active_cases: return await interaction.followup.send("✅ You have no active warnings or restrictions available to appeal!", ephemeral=True)
     await interaction.followup.send("📋 **Infraction System Appeal Port:**\nSelect the case file from the dropdown:", view=AppealDropdownView(active_cases), ephemeral=True)
 
-# 🚀 RESTORED SEAMLESS ONE-CLICK RUN: Options box parameter completely stripped out!
 @bot.tree.command(name="viewmywarnings", description="View all your warnings split between Discord and Roblox (private)")
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    
-    # Grabs clicking user's unique string footprint automatically behind the scenes
     user_id = str(interaction.user.id)
     warnings = get_user_warnings(user_id)
     embed = discord.Embed(title="User Moderation History", description="Your logs are categorized below based on where the infraction occurred.", color=discord.Color.from_rgb(44, 62, 80))
