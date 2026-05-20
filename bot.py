@@ -9,16 +9,23 @@ import threading
 import json
 import re
 import asyncio
-from flask import Flask
+from flask import Flask, request, jsonify, render_template_string
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
+VERIFY_SHEET_NAME = "VerifiedUsers"  
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505808587807789117  
 APPEAL_CHANNEL_ID = 1505891264032149574  
+
+# 🔐 Roblox Official OAuth2 Config Credentials
+ROBLOX_CLIENT_ID     = os.environ.get("ROBLOX_CLIENT_ID", "")
+ROBLOX_CLIENT_SECRET = os.environ.get("ROBLOX_CLIENT_SECRET", "")
+# Must match what you typed inside the Roblox Creator Dashboard exactly!
+ROBLOX_REDIRECT_URI  = "https://bot-h57e.onrender.com/roblox_callback" 
 
 # Your official application appeal assets
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
@@ -27,7 +34,11 @@ SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
 
+VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C"
+VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+
 ROLES_BACKUP_FILE = "suspended_roles.json"
+STATE_STORE = {} # Secure anti-forgery tracking directory: {state_string: discord_user_id}
 
 # Column indices
 COL_USER_ID     = 0
@@ -56,7 +67,7 @@ PROTECTED_ROLE_NAMES = [
     "Tickets v2", "BD Department", "BM Department"
 ]
 
-# ── Google Authentication (Render Secret Directory Path Alignment) ────────────
+# ── Google Authentication ──────────────────────────────────────────────────────
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
@@ -88,7 +99,6 @@ def sheets_headers():
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
 def extract_id(input_string: str) -> str:
-    """Cleans mentions out to isolate raw numerical IDs, or preserves clean strings."""
     match = re.search(r'\d+', input_string)
     return match.group(0) if match else input_string.strip()
 
@@ -132,6 +142,25 @@ def get_user_warnings(user_id):
         if row[COL_USER_ID].strip() == str(user_id).strip():
             results.append((row, i + 2))
     return results
+
+# ── Verification Database Helpers ──────────────────────────────────────────────
+def log_verified_user(discord_id: str, roblox_id: str, roblox_username: str):
+    try:
+        payload = {"values": [[str(discord_id), str(roblox_id), str(roblox_username)]]}
+        requests.post(VERIFY_APPEND_URL, headers=sheets_headers(), json=payload, timeout=10)
+    except Exception as e:
+        print(f"[Verification Sheet Log Error] {e}")
+
+def get_verified_roblox_id(discord_id: str) -> str:
+    try:
+        resp = requests.get(VERIFY_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        if len(rows) > 1:
+            for row in rows[1:]:
+                if row and row[0].strip() == str(discord_id).strip():
+                    return row[1].strip()
+    except Exception: pass
+    return None
 
 # ── Roles Backup Helpers ───────────────────────────────────────────────────────
 def save_suspended_roles(user_id, role_ids):
@@ -207,7 +236,6 @@ class WarningsBot(commands.Bot):
         print(f"✅ Logged in as {self.user}")
         if not update_status_embed.is_running():
             update_status_embed.start()
-        # 🚀 Starts your automated background loop worker here!
         if not automatic_expiry_sweeper.is_running():
             automatic_expiry_sweeper.start()
 
@@ -241,11 +269,9 @@ async def update_status_embed():
 # ── Automated Background Expiry Engine (Runs Daily) ───────────────────────────
 @tasks.loop(hours=24)
 async def automatic_expiry_sweeper():
-    """Loops database sheets dynamically, looking for expired punishments to lift cleanly."""
     print("[Sweeper] Starting automated infraction expiration analysis...")
     rows = read_all_rows()
-    if not rows:
-        return
+    if not rows: return
 
     now = datetime.datetime.utcnow()
     current_date = now.date()
@@ -257,45 +283,31 @@ async def automatic_expiry_sweeper():
         restriction_type = row[COL_RESTRICTION].strip()
         expiry_str = row[COL_END_DATE].strip()
 
-        # Isolate rows containing unrevoked punishments with dates assigned
         if is_revoked or not user_id_str or expiry_str in ("Never", "", "None"):
             continue
 
         try:
-            # Check standard date syntax formatting boundary (YYYY-MM-DD)
             clean_date_str = expiry_str.split(" ")[0].strip()
             expiry_date = datetime.datetime.strptime(clean_date_str, "%Y-%m-%d").date()
-        except Exception:
-            continue
+        except Exception: continue
 
-        # Check if the restriction has reached or passed its targeted duration limit
         if current_date >= expiry_date:
             print(f"[Sweeper] Processing automatic termination for User ID: {user_id_str} [{restriction_type}]")
-            
-            # Loop through all bot-connected servers to lift enforcement natively
             for guild in bot.guilds:
                 if restriction_type == "Ban":
                     try:
                         await guild.unban(discord.Object(id=int(user_id_str)), reason="System Auto-Expiry: Temporal duration limit exceeded.")
-                        print(f"[Sweeper] Successfully unbanned ID {user_id_str} from server instance.")
-                    except Exception as e:
-                        print(f"[Sweeper] Failed to auto-unban {user_id_str}: {e}")
-                
+                    except Exception: pass
                 elif restriction_type == "Timeout":
                     try:
                         member = await guild.fetch_member(int(user_id_str))
-                        if member:
-                            await member.timeout(None, reason="System Auto-Expiry: Temporal duration limit exceeded.")
-                            print(f"[Sweeper] Successfully unmuted ID {user_id_str}.")
+                        if member: await member.timeout(None, reason="System Auto-Expiry: Temporal duration limit exceeded.")
                     except Exception: pass
 
-            # Update Google Sheet row records to reflect system intervention status flags
             row[COL_REVOKED] = "TRUE"
             row[COL_REVOKED_BY] = "System Auto-Expiry"
             row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             update_row(idx + 2, row)
-            
-            # Small delay to keep the bot clear of Google API read/write throttling limits
             await asyncio.sleep(1)
 
 # ── Interactive Appeal System Views ───────────────────────────────────────────
@@ -538,6 +550,38 @@ def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_u
     return embed
 
 # ── Slash Commands ─────────────────────────────────────────────────────────────
+@bot.tree.command(name="verify", description="Link your Roblox account securely using the official Roblox Linking Prompt")
+async def verify(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    user_id = interaction.user.id
+    
+    if get_verified_roblox_id(user_id):
+        return await interaction.followup.send("⚠️ **Account Linked Already:** Your profile is already registered in the database.", ephemeral=True)
+
+    # Generate an anti-forgery unique security state token string
+    state_token = str(uuid.uuid4())
+    STATE_STORE[state_token] = user_id
+
+    # Constructs the official Roblox OAuth2 account linking URL block context
+    roblox_oauth_url = (
+        f"https://apis.roblox.com/oauth/v1/authorize"
+        f"?client_id={ROBLOX_CLIENT_ID}"
+        f"&redirect_uri={ROBLOX_REDIRECT_URI}"
+        f"&scope=openid+profile"
+        f"&response_type=code"
+        f"&state={state_token}"
+    )
+
+    embed = discord.Embed(
+        title="🔐 Official Roblox Account Verification",
+        description="Click the official secure authorization link below to securely bind your Roblox coordinates directly to your server profile.",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="📋 Verification Link", value=f"🔗 **[Click Here to Link Roblox Account]({roblox_oauth_url})**", inline=False)
+    embed.set_footer(text="Powered by Official Roblox OAuth2 Security Framework")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="send_message", description="[Admin] Dispatch an announcement message or copy-paste an embed JSON structure into a channel")
 @app_commands.describe(channel_id="The numerical unique ID of your target channel", message="Optional basic markdown text message content", embed_json="Optional copy-pasted embed code structured in valid JSON profile")
 async def send_message(interaction: discord.Interaction, channel_id: str, message: str = None, embed_json: str = None):
@@ -549,7 +593,6 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
     
     if not target_channel:
         return await interaction.followup.send(f"❌ **Error:** Target channel ID `{cleaned_chan_id}` could not be located inside this server footprint.")
-    
     if not message and not embed_json:
         return await interaction.followup.send("❌ **Error:** You must provide either a text string `message` or a formatted `embed_json` block to transmit data.")
 
@@ -564,8 +607,7 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
             data = json.loads(clean_json.strip())
             if "embeds" in data and isinstance(data["embeds"], list) and len(data["embeds"]) > 0:
                 embed_dict = data["embeds"][0]
-            else:
-                embed_dict = data
+            else: embed_dict = data
 
             target_embed = discord.Embed.from_dict(embed_dict)
         except Exception as e:
@@ -743,7 +785,6 @@ async def ban_cmd(interaction: discord.Interaction, user_target: str, reason: st
             if user_obj: target_name = str(user_obj)
         except Exception: pass
 
-    # Hand off standard temporal data formats (YYYY-MM-DD) natively
     clean_end_date = end_date.strip() if end_date else "Never"
     await run_moderation_action(interaction, cleaned_id, target_name, target_member, reason, "Ban", source.value if source else "Discord", clean_end_date)
 
@@ -801,10 +842,100 @@ async def restoreroles(interaction: discord.Interaction):
             break
     await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly.", ephemeral=True)
 
-# ── Production Flask Engine Server ─────────────────────────────────────────────
+# ── Production Flask Engine Server & Roblox Secure OAuth2 Receiver ─────────────
 app = Flask(__name__)
+
+# Basic verification success landing page canvas template styling framework
+SUCCESS_HTML_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Verification Complete</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0f172a; color: #f8fafc; text-align: center; padding-top: 100px; }
+        .card { background-color: #1e293b; max-width: 450px; margin: 0 auto; padding: 40px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); border: 1px solid #334155; }
+        h1 { color: #22c55e; margin-bottom: 10px; }
+        p { color: #94a3b8; font-size: 16px; margin-bottom: 25px; }
+        .footer { font-size: 12px; color: #475569; margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>✅ Verification Success!</h1>
+        <p>Your Roblox account identity <strong>{{ username }}</strong> has been securely linked to your Discord account footprint.</p>
+        <span style="color: #64748b; font-size: 14px;">You can safely close this browser window tab now.</span>
+        <div class="footer">Automated Compliance Engine • Busways Administration</div>
+    </div>
+</body>
+</html>
+"""
+
 @app.route('/')
-def home(): return "BWR7 Warnings Bot is Online Framework Stable!", 200
+def home(): 
+    return "BWR7 Warnings Bot is Online Framework Stable!", 200
+
+@app.route('/roblox_callback')
+def roblox_callback():
+    """Secure OAuth2 token exchange endpoint catching returns sent by Roblox infrastructure."""
+    auth_code = request.args.get("code")
+    returned_state = request.args.get("state")
+
+    if not auth_code or not returned_state:
+        return "❌ Missing verification parameters from authorization gateway.", 400
+
+    # Locate and match tracking state strings to ensure request security boundary integrity
+    discord_user_id = STATE_STORE.pop(returned_state, None)
+    if not discord_user_id:
+        return "❌ Invalid anti-forgery request session state token expired.", 403
+
+    # Exchange Authorization Code for raw account access token footprints directly
+    try:
+        token_url = "https://apis.roblox.com/oauth/v1/token"
+        payload = {
+            "client_id": ROBLOX_CLIENT_ID,
+            "client_secret": ROBLOX_CLIENT_SECRET,
+            "grant_type": "authorization_code",
+            "code": auth_code,
+            "redirect_uri": ROBLOX_REDIRECT_URI
+        }
+        
+        token_resp = requests.post(token_url, data=payload, timeout=10)
+        if token_resp.status_code != 200:
+            return f"❌ Token request failure inside authorization channel: {token_resp.text}", 500
+
+        access_token = token_resp.json().get("access_token")
+
+        # Use token to query user demographic index identifiers cleanly
+        userinfo_url = "https://apis.roblox.com/oauth/v1/userinfo"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        userinfo_resp = requests.get(userinfo_url, headers=headers, timeout=10)
+        
+        if userinfo_resp.status_code != 200:
+            return "❌ Failed fetching demographic profile array matching credentials.", 500
+
+        user_info_data = userinfo_resp.json()
+        roblox_id = user_info_data.get("sub") # Alphanumeric sub string holds Roblox ID
+        roblox_name = user_info_data.get("preferred_username")
+
+        # Save linked identity mapping coordinates into sheets row collections cleanly
+        log_verified_user(str(discord_user_id), str(roblox_id), roblox_name)
+
+        # Send confirmation direct notice embed asynchronously safely
+        async def send_dm():
+            try:
+                user = await bot.fetch_user(int(discord_user_id))
+                if user:
+                    embed = discord.Embed(title="✅ Account Verification Complete!", description="Your server profile has been linked to the official Roblox registry database.", color=discord.Color.green())
+                    embed.add_field(name="Roblox Username", value=f"[{roblox_name}](https://www.roblox.com/users/{roblox_id}/profile)", inline=True)
+                    embed.add_field(name="Account User ID", value=f"`{roblox_id}`", inline=True)
+                    await user.send(embed=embed)
+            except Exception: pass
+
+        bot.loop.create_task(send_dm())
+        return render_template_string(SUCCESS_HTML_PAGE, username=roblox_name)
+
+    except Exception as e:
+        return f"❌ System callback operation loop encountered exception: {str(e)}", 500
 
 def run_discord_bot():
     if not DISCORD_TOKEN: return
