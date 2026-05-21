@@ -16,15 +16,15 @@ DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
 VERIFY_SHEET_NAME = "VerifiedUsers"  
+STATE_SHEET_NAME  = "TempStates"  # 🚀 New persistent state tracking storage tab
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505808587807789117  
 APPEAL_CHANNEL_ID = 1505891264032149574  
 
-# 🔐 Roblox Official OAuth2 Config Credentials
+# 🔐 Roblox Official OAuth2 Credentials
 ROBLOX_CLIENT_ID     = os.environ.get("ROBLOX_CLIENT_ID", "")
 ROBLOX_CLIENT_SECRET = os.environ.get("ROBLOX_CLIENT_SECRET", "")
-# Must match what you typed inside the Roblox Creator Dashboard exactly!
 ROBLOX_REDIRECT_URI  = "https://bot-h57e.onrender.com/roblox_callback" 
 
 # Your official application appeal assets
@@ -37,8 +37,11 @@ SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C"
 VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
+# Endpoint references targeting your persistent cloud state matrix sheet rows
+STATE_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C"
+STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+
 ROLES_BACKUP_FILE = "suspended_roles.json"
-STATE_STORE = {} # Secure anti-forgery tracking directory: {state_string: discord_user_id}
 
 # Column indices
 COL_USER_ID     = 0
@@ -160,6 +163,36 @@ def get_verified_roblox_id(discord_id: str) -> str:
                 if row and row[0].strip() == str(discord_id).strip():
                     return row[1].strip()
     except Exception: pass
+    return None
+
+# ── Cloud Token State Persistence Helpers (Bypasses Local Memory Restarts) ─────
+def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
+    try:
+        ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        payload = {"values": [[str(state_token), str(discord_user_id), ts]]}
+        requests.post(STATE_APPEND_URL, headers=sheets_headers(), json=payload, timeout=10)
+    except Exception as e:
+        print(f"[Cloud State Appending Error] {e}")
+
+def pop_oauth_state_from_cloud(state_token: str) -> str:
+    """Finds the tracking state code inside your sheet, grabs the user ID, and clears it."""
+    try:
+        resp = requests.get(STATE_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        if not rows or len(rows) <= 1:
+            return None
+            
+        for i, row in enumerate(rows[1:]):
+            if row and row[0].strip() == str(state_token).strip():
+                discord_id = row[1].strip()
+                
+                # Clean up that row matrix line so tokens can never be recycled or compromised
+                clear_range = f"{STATE_SHEET_NAME}!A{i+2}:C{i+2}"
+                clear_url = f"{SHEET_UPDATE_BASE}{clear_range}?valueInputOption=RAW"
+                requests.put(clear_url, headers=sheets_headers(), json={"values": [["", "", ""]]}, timeout=5)
+                return discord_id
+    except Exception as e:
+        print(f"[Cloud State Evaluation Error] {e}")
     return None
 
 # ── Roles Backup Helpers ───────────────────────────────────────────────────────
@@ -558,11 +591,10 @@ async def verify(interaction: discord.Interaction):
     if get_verified_roblox_id(user_id):
         return await interaction.followup.send("⚠️ **Account Linked Already:** Your profile is already registered in the database.", ephemeral=True)
 
-    # Generate an anti-forgery unique security state token string
     state_token = str(uuid.uuid4())
-    STATE_STORE[state_token] = user_id
+    # 🚀 Securely log the temporary token right into your new cloud sheet tab
+    save_oauth_state_to_cloud(state_token, user_id)
 
-    # Constructs the official Roblox OAuth2 account linking URL block context
     roblox_oauth_url = (
         f"https://apis.roblox.com/oauth/v1/authorize"
         f"?client_id={ROBLOX_CLIENT_ID}"
@@ -845,7 +877,6 @@ async def restoreroles(interaction: discord.Interaction):
 # ── Production Flask Engine Server & Roblox Secure OAuth2 Receiver ─────────────
 app = Flask(__name__)
 
-# Basic verification success landing page canvas template styling framework
 SUCCESS_HTML_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -874,21 +905,27 @@ SUCCESS_HTML_PAGE = """
 def home(): 
     return "BWR7 Warnings Bot is Online Framework Stable!", 200
 
+@app.route('/privacy')
+def privacy():
+    return "Busways Verification App Privacy Policy: This application securely handles Roblox account identifiers (Username and User ID) solely for the purpose of linking server user metrics. We do not distribute, store long-term outside of your server's designated Google Sheet infrastructure, or sell any user demographic profiles. Data can be fully purged at any time by contacting server management directly.", 200
+
+@app.route('/terms')
+def terms():
+    return "Busways Verification App Terms of Service: By utilizing this verification portal, you authorize the application to verify your publicly available Roblox username and unique numeric identifier to tie into your server profile history. Misuse of the linking framework or attempts to exploit the OAuth2 authentication exchange boundary will result in an immediate permanent administrative server restriction.", 200
+
 @app.route('/roblox_callback')
 def roblox_callback():
-    """Secure OAuth2 token exchange endpoint catching returns sent by Roblox infrastructure."""
     auth_code = request.args.get("code")
     returned_state = request.args.get("state")
 
     if not auth_code or not returned_state:
         return "❌ Missing verification parameters from authorization gateway.", 400
 
-    # Locate and match tracking state strings to ensure request security boundary integrity
-    discord_user_id = STATE_STORE.pop(returned_state, None)
+    # 🚀 Securely query your cloud sheet registry instead of local volatile memory!
+    discord_user_id = pop_oauth_state_from_cloud(returned_state)
     if not discord_user_id:
         return "❌ Invalid anti-forgery request session state token expired.", 403
 
-    # Exchange Authorization Code for raw account access token footprints directly
     try:
         token_url = "https://apis.roblox.com/oauth/v1/token"
         payload = {
@@ -905,7 +942,6 @@ def roblox_callback():
 
         access_token = token_resp.json().get("access_token")
 
-        # Use token to query user demographic index identifiers cleanly
         userinfo_url = "https://apis.roblox.com/oauth/v1/userinfo"
         headers = {"Authorization": f"Bearer {access_token}"}
         userinfo_resp = requests.get(userinfo_url, headers=headers, timeout=10)
@@ -914,13 +950,11 @@ def roblox_callback():
             return "❌ Failed fetching demographic profile array matching credentials.", 500
 
         user_info_data = userinfo_resp.json()
-        roblox_id = user_info_data.get("sub") # Alphanumeric sub string holds Roblox ID
+        roblox_id = user_info_data.get("sub") 
         roblox_name = user_info_data.get("preferred_username")
 
-        # Save linked identity mapping coordinates into sheets row collections cleanly
         log_verified_user(str(discord_user_id), str(roblox_id), roblox_name)
 
-        # Send confirmation direct notice embed asynchronously safely
         async def send_dm():
             try:
                 user = await bot.fetch_user(int(discord_user_id))
