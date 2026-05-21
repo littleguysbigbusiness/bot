@@ -38,7 +38,7 @@ VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 STATE_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C"
-STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 ROLES_BACKUP_FILE = "suspended_roles.json"
 
@@ -175,18 +175,26 @@ def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
 
 def pop_oauth_state_from_cloud(state_token: str) -> str:
     try:
-        resp = requests.get(STATE_READ_URL, headers=sheets_headers(), timeout=10)
-        rows = resp.json().get("values", [])
-        if not rows or len(rows) <= 1:
-            return None
+        # 🚀 UPGRADED: Aggressive 5-step polling retry loop to accommodate API sync delays
+        for attempt in range(5):
+            resp = requests.get(STATE_READ_URL, headers=sheets_headers(), timeout=10)
+            rows = resp.json().get("values", [])
             
-        for i, row in enumerate(rows[1:]):
-            if row and row[0].strip() == str(state_token).strip():
-                discord_id = row[1].strip()
-                clear_range = f"{STATE_SHEET_NAME}!A{i+2}:C{i+2}"
-                clear_url = f"{SHEET_UPDATE_BASE}{clear_range}?valueInputOption=RAW"
-                requests.put(clear_url, headers=sheets_headers(), json={"values": [["", "", ""]]}, timeout=5)
-                return discord_id
+            if rows and len(rows) > 1:
+                for i, row in enumerate(rows[1:]):
+                    if row and row[0].strip() == str(state_token).strip():
+                        discord_id = row[1].strip()
+                        
+                        # Clear state row cleanly to block token recycling splits
+                        clear_range = f"{STATE_SHEET_NAME}!A{i+2}:C{i+2}"
+                        clear_url = f"{SHEET_UPDATE_BASE}{clear_range}?valueInputOption=RAW"
+                        requests.put(clear_url, headers=sheets_headers(), json={"values": [["", "", ""]]}, timeout=5)
+                        return discord_id
+            
+            print(f"[Sweeper API Sync] Token not indexed yet on attempt {attempt+1}. Retrying loop...")
+            import time
+            time.sleep(1)
+            
     except Exception as e:
         print(f"[Cloud State Evaluation Error] {e}")
     return None
@@ -421,7 +429,7 @@ class AppealReviewButtons(discord.ui.View):
     @discord.ui.button(label="Deny Appeal", style=discord.ButtonStyle.danger, custom_id="deny_appeal_btn", emoji="🔴")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        await interaction.message.defer()
+        await interaction.response.defer()
         embed = interaction.message.embeds[0]
         case_id = embed.fields[1].value.replace("`", "").strip()
         appellant_id = int(embed.fields[0].value.split("\n`ID: ")[1].replace("`", "").strip())
@@ -586,16 +594,13 @@ async def setprefix(interaction: discord.Interaction, prefix: str):
     member = interaction.user
     clean_prefix = prefix.strip()
     
-    # 🛑 Check 1: Length Validation
     if len(clean_prefix) > 5:
         return await interaction.followup.send("❌ **Validation Error:** Your prefix cannot be longer than **5 characters**.", ephemeral=True)
         
-    # 🛑 Check 2: Blacklist Validation (Using regex to catch stealth variants like C.E.O or C-E-O)
     normalized_prefix = re.sub(r'[^A-Za-z0-9]', '', clean_prefix).upper()
     if normalized_prefix in ("CEO", "VCEO"):
         return await interaction.followup.send("❌ **Access Denied:** The prefixes **CEO** and **VCEO** are strictly reserved for executive management.", ephemeral=True)
 
-    # Isolate baseline display name cleanly
     base_name = member.display_name
     if " - " in base_name:
         base_name = base_name.split(" - ")[1].strip()
@@ -823,7 +828,7 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
     elif unit == "hours": delta = datetime.timedelta(hours=duration_amount)
     else: delta = datetime.timedelta(days=duration_amount)
     
-    expiry_time = datetime.datetime.utcnow() + delta
+    expiry_time = datetime.utcnow() + delta
     final_expiry_stamp = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     await run_moderation_action(interaction, str(user.id), str(user), user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, timeout_duration=delta)
 
@@ -950,9 +955,7 @@ def roblox_callback():
     if not auth_code or not returned_state:
         return "❌ Missing verification parameters from authorization gateway.", 400
 
-    import time
-    time.sleep(2)
-
+    # Execute polling check against database registry using the newly configured loop engine
     discord_user_id = pop_oauth_state_from_cloud(returned_state)
     if not discord_user_id:
         return "❌ Invalid anti-forgery request session state token expired.", 403
