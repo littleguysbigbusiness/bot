@@ -16,7 +16,7 @@ DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME        = "Violations"
 VERIFY_SHEET_NAME = "VerifiedUsers"  
-STATE_SHEET_NAME  = "TempStates"  # 🚀 New persistent state tracking storage tab
+STATE_SHEET_NAME  = "TempStates"  
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276  
 STATIC_STATUS_ID  = 1505808587807789117  
@@ -35,11 +35,10 @@ SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
 
 VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C"
-VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
-# Endpoint references targeting your persistent cloud state matrix sheet rows
 STATE_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C"
-STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 ROLES_BACKUP_FILE = "suspended_roles.json"
 
@@ -165,7 +164,7 @@ def get_verified_roblox_id(discord_id: str) -> str:
     except Exception: pass
     return None
 
-# ── Cloud Token State Persistence Helpers (Bypasses Local Memory Restarts) ─────
+# ── Cloud Token State Persistence Helpers ──────────────────────────────────────
 def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
     try:
         ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -175,7 +174,6 @@ def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
         print(f"[Cloud State Appending Error] {e}")
 
 def pop_oauth_state_from_cloud(state_token: str) -> str:
-    """Finds the tracking state code inside your sheet, grabs the user ID, and clears it."""
     try:
         resp = requests.get(STATE_READ_URL, headers=sheets_headers(), timeout=10)
         rows = resp.json().get("values", [])
@@ -185,8 +183,6 @@ def pop_oauth_state_from_cloud(state_token: str) -> str:
         for i, row in enumerate(rows[1:]):
             if row and row[0].strip() == str(state_token).strip():
                 discord_id = row[1].strip()
-                
-                # Clean up that row matrix line so tokens can never be recycled or compromised
                 clear_range = f"{STATE_SHEET_NAME}!A{i+2}:C{i+2}"
                 clear_url = f"{SHEET_UPDATE_BASE}{clear_range}?valueInputOption=RAW"
                 requests.put(clear_url, headers=sheets_headers(), json={"values": [["", "", ""]]}, timeout=5)
@@ -338,7 +334,7 @@ async def automatic_expiry_sweeper():
                     except Exception: pass
 
             row[COL_REVOKED] = "TRUE"
-            row[COL_REVOKED_BY] = "System Auto-Expiry"
+            row[COL_REVOKED] = "System Auto-Expiry"
             row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
             update_row(idx + 2, row)
             await asyncio.sleep(1)
@@ -425,7 +421,7 @@ class AppealReviewButtons(discord.ui.View):
     @discord.ui.button(label="Deny Appeal", style=discord.ButtonStyle.danger, custom_id="deny_appeal_btn", emoji="🔴")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_admin(interaction): return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        await interaction.response.defer()
+        await interaction.message.defer()
         embed = interaction.message.embeds[0]
         case_id = embed.fields[1].value.replace("`", "").strip()
         appellant_id = int(embed.fields[0].value.split("\n`ID: ")[1].replace("`", "").strip())
@@ -583,6 +579,40 @@ def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_u
     return embed
 
 # ── Slash Commands ─────────────────────────────────────────────────────────────
+@bot.tree.command(name="setprefix", description="Modify your server nickname layout with an organizational prefix tag")
+@app_commands.describe(prefix="The prefix to add to your name (Max 5 letters. CEO/VCEO restricted)")
+async def setprefix(interaction: discord.Interaction, prefix: str):
+    await interaction.response.defer(ephemeral=True)
+    member = interaction.user
+    clean_prefix = prefix.strip()
+    
+    # 🛑 Check 1: Length Validation
+    if len(clean_prefix) > 5:
+        return await interaction.followup.send("❌ **Validation Error:** Your prefix cannot be longer than **5 characters**.", ephemeral=True)
+        
+    # 🛑 Check 2: Blacklist Validation (Using regex to catch stealth variants like C.E.O or C-E-O)
+    normalized_prefix = re.sub(r'[^A-Za-z0-9]', '', clean_prefix).upper()
+    if normalized_prefix in ("CEO", "VCEO"):
+        return await interaction.followup.send("❌ **Access Denied:** The prefixes **CEO** and **VCEO** are strictly reserved for executive management.", ephemeral=True)
+
+    # Isolate baseline display name cleanly
+    base_name = member.display_name
+    if " - " in base_name:
+        base_name = base_name.split(" - ")[1].strip()
+
+    new_nickname = f"{clean_prefix} - {base_name}"
+    
+    if len(new_nickname) > 32:
+        return await interaction.followup.send("❌ **Error:** Nickname string exceeds Discord's 32-character limit.", ephemeral=True)
+        
+    try:
+        await member.edit(nick=new_nickname)
+        await interaction.followup.send(f"✅ **Nickname configured:** Your name is now set to `{new_nickname}`", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ **API Error:** The bot is unable to modify your name. Ensure the bot's role is dragged higher in server hierarchy settings.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ **System Error:** Operation failed: `{e}`", ephemeral=True)
+
 @bot.tree.command(name="verify", description="Link your Roblox account securely using the official Roblox Linking Prompt")
 async def verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -592,7 +622,6 @@ async def verify(interaction: discord.Interaction):
         return await interaction.followup.send("⚠️ **Account Linked Already:** Your profile is already registered in the database.", ephemeral=True)
 
     state_token = str(uuid.uuid4())
-    # 🚀 Securely log the temporary token right into your new cloud sheet tab
     save_oauth_state_to_cloud(state_token, user_id)
 
     roblox_oauth_url = (
@@ -907,11 +936,11 @@ def home():
 
 @app.route('/privacy')
 def privacy():
-    return "Busways Verification App Privacy Policy: This application securely handles Roblox account identifiers (Username and User ID) solely for the purpose of linking server user metrics. We do not distribute, store long-term outside of your server's designated Google Sheet infrastructure, or sell any user demographic profiles. Data can be fully purged at any time by contacting server management directly.", 200
+    return "Busways Verification App Privacy Policy: This application securely handles Roblox account identifiers solely for purpose linking server user metrics.", 200
 
 @app.route('/terms')
 def terms():
-    return "Busways Verification App Terms of Service: By utilizing this verification portal, you authorize the application to verify your publicly available Roblox username and unique numeric identifier to tie into your server profile history. Misuse of the linking framework or attempts to exploit the OAuth2 authentication exchange boundary will result in an immediate permanent administrative server restriction.", 200
+    return "Busways Verification App Terms of Service: By utilizing this verification portal, you authorize the application to verify your Roblox unique numeric identifier.", 200
 
 @app.route('/roblox_callback')
 def roblox_callback():
@@ -921,7 +950,9 @@ def roblox_callback():
     if not auth_code or not returned_state:
         return "❌ Missing verification parameters from authorization gateway.", 400
 
-    # 🚀 Securely query your cloud sheet registry instead of local volatile memory!
+    import time
+    time.sleep(2)
+
     discord_user_id = pop_oauth_state_from_cloud(returned_state)
     if not discord_user_id:
         return "❌ Invalid anti-forgery request session state token expired.", 403
@@ -955,17 +986,24 @@ def roblox_callback():
 
         log_verified_user(str(discord_user_id), str(roblox_id), roblox_name)
 
-        async def send_dm():
+        async def send_dm_and_rename():
             try:
+                for guild in bot.guilds:
+                    try:
+                        member = await guild.fetch_member(int(discord_user_id))
+                        if member:
+                            await member.edit(nick=roblox_name[:32], reason="Automated Roblox verification nickname sync.")
+                    except Exception: pass
+
                 user = await bot.fetch_user(int(discord_user_id))
                 if user:
-                    embed = discord.Embed(title="✅ Account Verification Complete!", description="Your server profile has been linked to the official Roblox registry database.", color=discord.Color.green())
+                    embed = discord.Embed(title="✅ Account Verification Complete!", description="Your server profile has been linked and your nickname synced to the official Roblox registry database.", color=discord.Color.green())
                     embed.add_field(name="Roblox Username", value=f"[{roblox_name}](https://www.roblox.com/users/{roblox_id}/profile)", inline=True)
                     embed.add_field(name="Account User ID", value=f"`{roblox_id}`", inline=True)
                     await user.send(embed=embed)
             except Exception: pass
 
-        bot.loop.create_task(send_dm())
+        bot.loop.create_task(send_dm_and_rename())
         return render_template_string(SUCCESS_HTML_PAGE, username=roblox_name)
 
     except Exception as e:
