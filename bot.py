@@ -9,19 +9,14 @@ from google.auth.transport.requests import Request
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
 SHEET_NAME = "Violations"
-VERIFY_SHEET_NAME = "VerifiedUsers"  
-STATUS_PAGE_URL = "https://bwr7s.statuspage.io/api/v2/summary.json"
-STATUS_CHANNEL_ID = 1476812926521184276  
-STATIC_STATUS_ID = 1505808587807789117  
-APPEAL_CHANNEL_ID = 1505891264032149574  
+VERIFY_SHEET_NAME = "VerifiedUsers"
+TEMP_STATE_SHEET = "TempStates"
 
 ROBLOX_CLIENT_ID = os.environ.get("ROBLOX_CLIENT_ID", "")
 ROBLOX_CLIENT_SECRET = os.environ.get("ROBLOX_CLIENT_SECRET", "")
-ROBLOX_REDIRECT_URI = "https://bot-h57e.onrender.com/roblox_callback" 
+ROBLOX_REDIRECT_URI = "https://bot-h57e.onrender.com/roblox_callback"
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
-
 ROLES_BACKUP_FILE = "suspended_roles.json"
-STATE_STORE = {} # Secure anti-forgery tracking directory
 
 PROTECTED_ROLE_NAMES = [
     "Rythm", "TTS Bot", "GiveawayBot", "Appy", "Application Blacklist...", "Busways OGS",
@@ -36,7 +31,7 @@ PROTECTED_ROLE_NAMES = [
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 app = Flask(__name__)
 
 # ── 3. GOOGLE SHEETS AUTH & DATABASE HELPERS ───────────────────────────────────
@@ -50,8 +45,8 @@ def extract_id(input_string: str) -> str:
 
 def pad(row, length=15): return list(row) + [""] * (length - len(row))
 
-def read_all_rows():
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
+def read_all_rows(sheet=SHEET_NAME):
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet}!A:O"
     try:
         resp = requests.get(url, headers=sheets_headers(), timeout=10)
         return resp.json().get("values", [])[1:]
@@ -61,24 +56,31 @@ def append_to_sheet(sheet_target, row_data):
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet_target}!A:O:append?valueInputOption=RAW"
     try:
         resp = requests.post(url, headers=sheets_headers(), json={"values": [row_data]}, timeout=10)
-        if resp.status_code != 200:
-            print(f"[ERROR] Sheet Logging Failed: {resp.text}")
-        else:
-            print(f"[SUCCESS] Logged to {sheet_target}.")
+        if resp.status_code != 200: print(f"[ERROR] Logging Failed: {resp.text}")
     except Exception as e: print(f"[ERROR] Connection failed: {e}")
 
-def update_row(idx, row_data):
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A{idx}:O{idx}?valueInputOption=RAW"
+def update_row(idx, row_data, sheet=SHEET_NAME):
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet}!A{idx}:O{idx}?valueInputOption=RAW"
     try: requests.put(url, headers=sheets_headers(), json={"values": [row_data]}, timeout=10)
     except: pass
 
-def get_verified_roblox_id(discord_id: str) -> str:
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C"
-    try:
-        rows = requests.get(url, headers=sheets_headers(), timeout=10).json().get("values", [])
-        for row in rows[1:]:
-            if row and row[0].strip() == str(discord_id).strip(): return row[1].strip()
+def clear_temp_state_row(idx):
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATE_SHEET}!A{idx}:C{idx}?valueInputOption=RAW"
+    try: requests.put(url, headers=sheets_headers(), json={"values": [["", "", ""]]}, timeout=5)
     except: pass
+
+def get_verified_roblox_id(discord_id: str) -> str:
+    rows = read_all_rows(VERIFY_SHEET_NAME)
+    for row in rows:
+        if row and row[0].strip() == str(discord_id).strip(): return row[1].strip()
+    return None
+
+def pop_oauth_state(token: str):
+    rows = read_all_rows(TEMP_STATE_SHEET)
+    for i, r in enumerate(rows):
+        if r and r[0].strip() == token.strip():
+            clear_temp_state_row(i + 2)
+            return r[1].strip()
     return None
 
 def save_suspended_roles(user_id, role_ids):
@@ -112,10 +114,9 @@ async def run_moderation_action(ctx, uid, name, member, reason, rtype, source, e
             color=discord.Color.red()
         )
         dm.add_field(name="📋 Infraction Type", value=rtype, inline=True)
-        dm.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
         dm.add_field(name="🔖 Case ID", value=f"`{wid}`", inline=True)
-        dm.add_field(name="🌐 Platform", value=source, inline=True)
         dm.add_field(name="⏱️ Expiration", value=expiry, inline=True)
+        dm.add_field(name="📋 Stated Reason", value=f"```text\n{reason}\n```", inline=False)
         dm.add_field(name="⚖️ Appeal Process", value=f"[Open Official Appeal Form]({GOOGLE_APPEAL_FORM_URL})", inline=False)
         dm.set_footer(text="Automated Compliance Engine • Busways Administration")
         try: await member.send(embed=dm)
@@ -144,42 +145,7 @@ async def run_moderation_action(ctx, uid, name, member, reason, rtype, source, e
     log.set_footer(text=f"Actioned by {ctx.user} • {ts}")
     await ctx.followup.send(embed=log)
 
-# ── 5. BACKGROUND TASKS ────────────────────────────────────────────────────────
-@tasks.loop(hours=24)
-async def automatic_expiry_sweeper():
-    print("[Sweeper] Starting automated infraction expiration analysis...")
-    rows = read_all_rows()
-    if not rows: return
-
-    current_date = datetime.datetime.utcnow().date()
-    for idx, raw in enumerate(rows):
-        row = pad(raw)
-        user_id_str, is_revoked, restriction_type, expiry_str = row[0].strip(), row[7].upper() == "TRUE", row[11].strip(), row[13].strip()
-
-        if is_revoked or not user_id_str or expiry_str in ("Never", "", "None"): continue
-
-        try:
-            expiry_date = datetime.datetime.strptime(expiry_str.split(" ")[0].strip(), "%Y-%m-%d").date()
-            if current_date >= expiry_date:
-                print(f"[Sweeper] Auto-lifting {restriction_type} for {user_id_str}")
-                for guild in bot.guilds:
-                    if restriction_type == "Ban":
-                        try: await guild.unban(discord.Object(id=int(user_id_str)), reason="System Auto-Expiry")
-                        except: pass
-                    elif restriction_type == "Timeout":
-                        try:
-                            member = await guild.fetch_member(int(user_id_str))
-                            if member: await member.timeout(None, reason="System Auto-Expiry")
-                        except: pass
-                
-                row[7] = "TRUE"
-                row[8] = "System Auto-Expiry"
-                row[9] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-                update_row(idx + 2, row)
-                await asyncio.sleep(1)
-        except: continue
-
-# ── 6. SLASH COMMANDS ──────────────────────────────────────────────────────────
+# ── 5. RESTORED SLASH COMMANDS ─────────────────────────────────────────────────
 @bot.tree.command(name="warn", description="Issue a formal warning")
 async def warn_cmd(interaction: discord.Interaction, user: discord.Member, reason: str):
     await interaction.response.defer()
@@ -228,8 +194,7 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
 async def restoreroles(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.defer(ephemeral=True)
     role_ids = pop_suspended_roles(user.id)
-    if not role_ids: 
-        return await interaction.followup.send("❌ No saved roles found for this user.", ephemeral=True)
+    if not role_ids: return await interaction.followup.send("❌ No saved roles found for this user.", ephemeral=True)
     
     restored = 0
     for rid in role_ids:
@@ -241,14 +206,49 @@ async def restoreroles(interaction: discord.Interaction, user: discord.Member):
             except: pass
     await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly.", ephemeral=True)
 
+@bot.tree.command(name="history", description="View official moderation history for a user")
+async def history(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer()
+    rows = read_all_rows()
+    warnings = [r for r in rows if r and r[0].strip() == str(user.id)]
+    
+    embed = discord.Embed(title=f"📋 Official Audit Record: {user.display_name}", color=discord.Color.from_rgb(44, 62, 80))
+    embed.set_thumbnail(url=user.display_avatar.url)
+    
+    if not warnings:
+        embed.description = "✅ No infractions found on official record."
+    else:
+        for w in warnings[-5:]: # Shows last 5 infractions
+            w = pad(w)
+            status = "🟢 Revoked" if w[7].upper() == "TRUE" else "🔴 Active"
+            embed.add_field(
+                name=f"Case {w[6]} | {w[11]}", 
+                value=f"**Date:** {w[5]}\n**Reason:** {w[4]}\n**Status:** {status}", 
+                inline=False
+            )
+    embed.set_footer(text="Automated Compliance Engine • Busways Administration")
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="checklink", description="Check your current Roblox account link status")
+async def checklink(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    roblox_id = get_verified_roblox_id(interaction.user.id)
+    if roblox_id:
+        await interaction.followup.send(f"✅ Your account is officially linked to Roblox ID: **{roblox_id}**", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ No official link found. Please run `/verify`.", ephemeral=True)
+
 @bot.tree.command(name="verify", description="Link your Roblox account securely using the official Roblox Prompt")
 async def verify(interaction: discord.Interaction):
+    # IMMEDIATELY defer to prevent 404 Unknown Interaction crashes
     await interaction.response.defer(ephemeral=True)
+    
     if get_verified_roblox_id(interaction.user.id):
         return await interaction.followup.send("⚠️ **Account Linked Already:** Your profile is already registered.", ephemeral=True)
 
     state_token = str(uuid.uuid4())
-    STATE_STORE[state_token] = interaction.user.id
+    # Save state to Google Sheets to survive Render sleeping/rebooting
+    append_to_sheet(TEMP_STATE_SHEET, [state_token, str(interaction.user.id), str(int(time.time()))])
     
     roblox_oauth_url = (
         f"https://apis.roblox.com/oauth/v1/authorize"
@@ -264,6 +264,41 @@ async def verify(interaction: discord.Interaction):
     embed.add_field(name="📋 Verification Link", value=f"🔗 **[Click Here to Link Roblox Account]({roblox_oauth_url})**", inline=False)
     embed.set_footer(text="Powered by Official Roblox OAuth2 Security Framework")
     await interaction.followup.send(embed=embed, ephemeral=True)
+
+# ── 6. BACKGROUND EXPIRY SWEEPER ───────────────────────────────────────────────
+@tasks.loop(hours=24)
+async def automatic_expiry_sweeper():
+    print("[Sweeper] Starting automated infraction expiration analysis...")
+    rows = read_all_rows()
+    if not rows: return
+
+    current_date = datetime.datetime.utcnow().date()
+    for idx, raw in enumerate(rows):
+        row = pad(raw)
+        user_id_str, is_revoked, restriction_type, expiry_str = row[0].strip(), row[7].upper() == "TRUE", row[11].strip(), row[13].strip()
+
+        if is_revoked or not user_id_str or expiry_str in ("Never", "", "None"): continue
+
+        try:
+            expiry_date = datetime.datetime.strptime(expiry_str.split(" ")[0].strip(), "%Y-%m-%d").date()
+            if current_date >= expiry_date:
+                print(f"[Sweeper] Auto-lifting {restriction_type} for {user_id_str}")
+                for guild in bot.guilds:
+                    if restriction_type == "Ban":
+                        try: await guild.unban(discord.Object(id=int(user_id_str)), reason="System Auto-Expiry")
+                        except: pass
+                    elif restriction_type == "Timeout":
+                        try:
+                            member = await guild.fetch_member(int(user_id_str))
+                            if member: await member.timeout(None, reason="System Auto-Expiry")
+                        except: pass
+                
+                row[7] = "TRUE"
+                row[8] = "System Auto-Expiry"
+                row[9] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                update_row(idx + 2, row)
+                await asyncio.sleep(1)
+        except: continue
 
 # ── 7. PRODUCTION FLASK SERVER & CALLBACK ──────────────────────────────────────
 SUCCESS_HTML_PAGE = """
@@ -299,8 +334,10 @@ def roblox_callback():
     auth_code, returned_state = request.args.get("code"), request.args.get("state")
     if not auth_code or not returned_state: return "❌ Missing parameters.", 400
 
-    discord_user_id = STATE_STORE.pop(returned_state, None)
-    if not discord_user_id: return "❌ Invalid anti-forgery request token expired.", 403
+    # Retrieve state securely from Google Sheets
+    discord_user_id = pop_oauth_state(returned_state)
+    if not discord_user_id: 
+        return "❌ Session expired or invalid. Please run /verify again in Discord.", 403
 
     try:
         token_resp = requests.post("https://apis.roblox.com/oauth/v1/token", data={
@@ -317,6 +354,7 @@ def roblox_callback():
         
         append_to_sheet(VERIFY_SHEET_NAME, [str(discord_user_id), str(roblox_id), roblox_name])
         
+        # Dispatch DM to user securely from Flask thread
         async def send_dm():
             try:
                 user = await bot.fetch_user(int(discord_user_id))
@@ -326,7 +364,9 @@ def roblox_callback():
                     embed.add_field(name="Account User ID", value=f"`{roblox_id}`", inline=True)
                     await user.send(embed=embed)
             except: pass
-        bot.loop.create_task(send_dm())
+        
+        # Thread-safe execution for Discord task
+        asyncio.run_coroutine_threadsafe(send_dm(), bot.loop)
         
         return render_template_string(SUCCESS_HTML_PAGE, username=roblox_name)
     except Exception as e: return f"❌ System callback error: {str(e)}", 500
