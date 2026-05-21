@@ -224,7 +224,26 @@ def roblox_callback():
     except Exception as e: return f"❌ Error: {e}", 500
 
 # ── Startup Logic ────────────────────────────────────────────────────────────
+# ── Robust Startup Logic ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Start bot and flask server together
-    threading.Thread(target=lambda: bot.run(DISCORD_TOKEN), daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    print("🚀 Starting Bot and Flask Server...")
+    
+    # 1. Start Discord Bot in a background thread
+    def run_bot():
+        try:
+            bot.run(DISCORD_TOKEN)
+        except Exception as e:
+            print(f"CRITICAL BOT ERROR: {e}")
+            os._exit(1) # Force crash so Render logs the error
+
+    threading.Thread(target=run_bot, daemon=True).start()
+
+    # 2. Start Flask Web Server in the main thread
+    # Render expects the main thread to be the web server
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Flask starting on port {port}")
+    try:
+        app.run(host="0.0.0.0", port=port)
+    except Exception as e:
+        print(f"CRITICAL WEB ERROR: {e}")
+        os._exit(1)
