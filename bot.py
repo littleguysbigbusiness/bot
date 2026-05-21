@@ -38,7 +38,7 @@ VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 STATE_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C"
-STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 ROLES_BACKUP_FILE = "suspended_roles.json"
 
@@ -164,18 +164,21 @@ def get_verified_roblox_id(discord_id: str) -> str:
     except Exception: pass
     return None
 
-# ── Cloud Token State Persistence Helpers ──────────────────────────────────────
+# ── Cloud Token State Persistence Helpers (With 5-Min Time Windows) ────────────
 def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
     try:
-        ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        payload = {"values": [[str(state_token), str(discord_user_id), ts]]}
+        # Save timestamp as standard Unix Epoch time string for easy, precise math
+        ts_epoch = str(int(datetime.datetime.utcnow().timestamp()))
+        payload = {"values": [[str(state_token), str(discord_user_id), ts_epoch]]}
         requests.post(STATE_APPEND_URL, headers=sheets_headers(), json=payload, timeout=10)
     except Exception as e:
         print(f"[Cloud State Appending Error] {e}")
 
 def pop_oauth_state_from_cloud(state_token: str) -> str:
     try:
-        # 🚀 UPGRADED: Aggressive 5-step polling retry loop to accommodate API sync delays
+        now_epoch = int(datetime.datetime.utcnow().timestamp())
+        
+        # Poll up to 5 times if Google is running slightly behind on syncing across workers
         for attempt in range(5):
             resp = requests.get(STATE_READ_URL, headers=sheets_headers(), timeout=10)
             rows = resp.json().get("values", [])
@@ -184,14 +187,23 @@ def pop_oauth_state_from_cloud(state_token: str) -> str:
                 for i, row in enumerate(rows[1:]):
                     if row and row[0].strip() == str(state_token).strip():
                         discord_id = row[1].strip()
+                        raw_ts = row[2].strip()
                         
-                        # Clear state row cleanly to block token recycling splits
+                        # ⏱️ Execute strict 5-Minute (300 seconds) longevity analysis window
+                        try:
+                            created_epoch = int(raw_ts)
+                            if (now_epoch - created_epoch) > 300:
+                                print(f"[Oauth Security] Token matched but failed longevity wall: Expired.")
+                                return None
+                        except Exception:
+                            pass # If timestamp parsing fails, default allow to protect alt account speeds
+
+                        # Clear state row cleanly so tokens cannot be recycled
                         clear_range = f"{STATE_SHEET_NAME}!A{i+2}:C{i+2}"
                         clear_url = f"{SHEET_UPDATE_BASE}{clear_range}?valueInputOption=RAW"
                         requests.put(clear_url, headers=sheets_headers(), json={"values": [["", "", ""]]}, timeout=5)
                         return discord_id
             
-            print(f"[Sweeper API Sync] Token not indexed yet on attempt {attempt+1}. Retrying loop...")
             import time
             time.sleep(1)
             
@@ -828,7 +840,7 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
     elif unit == "hours": delta = datetime.timedelta(hours=duration_amount)
     else: delta = datetime.timedelta(days=duration_amount)
     
-    expiry_time = datetime.utcnow() + delta
+    expiry_time = datetime.datetime.utcnow() + delta
     final_expiry_stamp = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
     await run_moderation_action(interaction, str(user.id), str(user), user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, timeout_duration=delta)
 
@@ -955,7 +967,7 @@ def roblox_callback():
     if not auth_code or not returned_state:
         return "❌ Missing verification parameters from authorization gateway.", 400
 
-    # Execute polling check against database registry using the newly configured loop engine
+    # Executes the robust cloud sheet verification check using the persistent timestamp tracker
     discord_user_id = pop_oauth_state_from_cloud(returned_state)
     if not discord_user_id:
         return "❌ Invalid anti-forgery request session state token expired.", 403
