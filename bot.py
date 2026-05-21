@@ -21,10 +21,9 @@ STATUS_CHANNEL_ID = 1476812926521184276
 STATIC_STATUS_ID  = 1505808587807789117  
 APPEAL_CHANNEL_ID = 1505891264032149574  
 
-# 🔐 Roblox Official OAuth2 Config Credentials
+# 🔐 Roblox Official OAuth2 Credentials
 ROBLOX_CLIENT_ID     = os.environ.get("ROBLOX_CLIENT_ID", "")
 ROBLOX_CLIENT_SECRET = os.environ.get("ROBLOX_CLIENT_SECRET", "")
-# Must match what you typed inside the Roblox Creator Dashboard exactly!
 ROBLOX_REDIRECT_URI  = "https://bot-h57e.onrender.com/roblox_callback" 
 
 # Your official application appeal assets
@@ -38,7 +37,7 @@ VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 ROLES_BACKUP_FILE = "suspended_roles.json"
-STATE_STORE = {} # Secure anti-forgery tracking directory: {state_string: discord_user_id}
+STATE_STORE = {} 
 
 # Column indices
 COL_USER_ID     = 0
@@ -558,11 +557,9 @@ async def verify(interaction: discord.Interaction):
     if get_verified_roblox_id(user_id):
         return await interaction.followup.send("⚠️ **Account Linked Already:** Your profile is already registered in the database.", ephemeral=True)
 
-    # Generate an anti-forgery unique security state token string
     state_token = str(uuid.uuid4())
     STATE_STORE[state_token] = user_id
 
-    # Constructs the official Roblox OAuth2 account linking URL block context
     roblox_oauth_url = (
         f"https://apis.roblox.com/oauth/v1/authorize"
         f"?client_id={ROBLOX_CLIENT_ID}"
@@ -845,7 +842,6 @@ async def restoreroles(interaction: discord.Interaction):
 # ── Production Flask Engine Server & Roblox Secure OAuth2 Receiver ─────────────
 app = Flask(__name__)
 
-# Basic verification success landing page canvas template styling framework
 SUCCESS_HTML_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -874,21 +870,28 @@ SUCCESS_HTML_PAGE = """
 def home(): 
     return "BWR7 Warnings Bot is Online Framework Stable!", 200
 
+# 🚀 NEW: Privacy Policy endpoint required for official Roblox publishing review
+@app.route('/privacy')
+def privacy():
+    return "Busways Verification App Privacy Policy: This application securely handles Roblox account identifiers (Username and User ID) solely for the purpose of linking server user metrics. We do not distribute, store long-term outside of your server's designated Google Sheet infrastructure, or sell any user demographic profiles. Data can be fully purged at any time by contacting server management directly.", 200
+
+# 🚀 NEW: Terms of Service endpoint required for official Roblox publishing review
+@app.route('/terms')
+def terms():
+    return "Busways Verification App Terms of Service: By utilizing this verification portal, you authorize the application to verify your publicly available Roblox username and unique numeric identifier to tie into your server profile history. Misuse of the linking framework or attempts to exploit the OAuth2 authentication exchange boundary will result in an immediate permanent administrative server restriction.", 200
+
 @app.route('/roblox_callback')
 def roblox_callback():
-    """Secure OAuth2 token exchange endpoint catching returns sent by Roblox infrastructure."""
     auth_code = request.args.get("code")
     returned_state = request.args.get("state")
 
     if not auth_code or not returned_state:
         return "❌ Missing verification parameters from authorization gateway.", 400
 
-    # Locate and match tracking state strings to ensure request security boundary integrity
     discord_user_id = STATE_STORE.pop(returned_state, None)
     if not discord_user_id:
         return "❌ Invalid anti-forgery request session state token expired.", 403
 
-    # Exchange Authorization Code for raw account access token footprints directly
     try:
         token_url = "https://apis.roblox.com/oauth/v1/token"
         payload = {
@@ -905,7 +908,6 @@ def roblox_callback():
 
         access_token = token_resp.json().get("access_token")
 
-        # Use token to query user demographic index identifiers cleanly
         userinfo_url = "https://apis.roblox.com/oauth/v1/userinfo"
         headers = {"Authorization": f"Bearer {access_token}"}
         userinfo_resp = requests.get(userinfo_url, headers=headers, timeout=10)
@@ -914,13 +916,11 @@ def roblox_callback():
             return "❌ Failed fetching demographic profile array matching credentials.", 500
 
         user_info_data = userinfo_resp.json()
-        roblox_id = user_info_data.get("sub") # Alphanumeric sub string holds Roblox ID
+        roblox_id = user_info_data.get("sub") 
         roblox_name = user_info_data.get("preferred_username")
 
-        # Save linked identity mapping coordinates into sheets row collections cleanly
         log_verified_user(str(discord_user_id), str(roblox_id), roblox_name)
 
-        # Send confirmation direct notice embed asynchronously safely
         async def send_dm():
             try:
                 user = await bot.fetch_user(int(discord_user_id))
