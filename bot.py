@@ -32,16 +32,16 @@ SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
 VERIFY_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C"
-VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+VERIFY_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFY_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 STATE_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C"
-STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+STATE_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STATE_SHEET_NAME}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 ROLES_BACKUP_FILE = "suspended_roles.json"
 COL_USER_ID, COL_USERNAME, COL_ISSUED_BY, COL_ISSUED_ID, COL_REASON, COL_TIMESTAMP, COL_INCIDENT_ID, COL_REVOKED, COL_REVOKED_BY, COL_REVOKED_AT, COL_SOURCE, COL_RESTRICTION, COL_START_DATE, COL_END_DATE, COL_ALT_INC_ID = range(15)
 
 PROTECTED_ROLE_NAMES = ["Rythm", "TTS Bot", "GiveawayBot", "Appy", "Application Blacklist...", "Busways OGS", "Near/Lived/Lives/R7", "He’s A Great Guy I Th...", "Service Pings", "astras Playhouse Key", "TTS", "Muted", "Security", "Warning 1", "Warning 2", "Warning 3", "Strike 1", "Strike 2", "Strike 3", "Staff Blacklisted", "Busways Assistance", "Partner", "Former Staff", "P-Passenger", "Dev Pings", "Giveaway Pings", "Application Pings", "Dyno", "Quark Logger", "Tickets v2", "BD Department", "BM Department"]
 
-# ── Google Authentication (RESTORED PROPERLY) ──────────────────────────────────
+# ── Google Authentication ──────────────────────────────────────────────────────
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 creds = None
@@ -619,7 +619,7 @@ def roblox_callback():
         token = requests.post("https://apis.roblox.com/oauth/v1/token", data={"client_id": ROBLOX_CLIENT_ID, "client_secret": ROBLOX_CLIENT_SECRET, "grant_type": "authorization_code", "code": code, "redirect_uri": ROBLOX_REDIRECT_URI}, timeout=10).json().get("access_token")
         user = requests.get("https://apis.roblox.com/oauth/v1/userinfo", headers={"Authorization": f"Bearer {token}"}, timeout=10).json()
         
-        # 🚀 POST DIRECTLY TO VERIFY SHEET
+        # POST DIRECTLY TO VERIFY SHEET
         try:
             requests.post(VERIFY_APPEND_URL, headers=sheets_headers(), json={"values": [[str(did), str(user['sub']), user['preferred_username']]]}, timeout=10)
         except Exception as e: print(f"Sheet write error: {e}")
