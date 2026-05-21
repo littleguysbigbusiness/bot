@@ -52,11 +52,16 @@ if os.path.exists(TARGET_PATH):
         creds = service_account.Credentials.from_service_account_file(TARGET_PATH, scopes=['https://www.googleapis.com/auth/spreadsheets'])
     except Exception as e: print(f"❌ Auth Error: {e}")
 
-def sheets_headers():
+ def sheets_headers():
     global creds
-    if creds and not creds.valid: creds.refresh(Request())
-    return {"Authorization": f"Bearer {creds.token if creds else ''}", "Content-Type": "application/json"}
-
+    # If using a service account file, use the internal creds
+    if creds:
+        if not creds.valid: creds.refresh(Request())
+        return {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
+    
+    # If falling back to the Environment Variable, use the one defined in Render
+    token = os.environ.get('GOOGLESHEETS_ACCESS_TOKEN', '')
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 # ── Database & State Helpers ──────────────────────────────────────────────────
 def extract_id(s): return re.search(r'\d+', s).group(0) if re.search(r'\d+', s) else s.strip()
 def pad(row, length=15): return list(row) + [""] * (length - len(row))
