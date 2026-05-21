@@ -79,23 +79,18 @@ def read_all_rows():
         resp = requests.get(SHEET_READ_URL, headers=sheets_headers(), timeout=10)
         rows = resp.json().get("values", [])
         return rows[1:] if len(rows) > 1 else []
-    except Exception as e:
-        print(f"[Sheets] Read error: {e}")
-        return []
+    except: return []
 
 def append_row(row):
-    try:
-        requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
-    except Exception as e:
-        print(f"[Sheets] Append error: {e}")
+    try: requests.post(SHEET_APPEND_URL, headers=sheets_headers(), json={"values": [row]}, timeout=10)
+    except: pass
 
 def update_row(row_index, sheet, row):
     try:
         range_str = f"{sheet}!A{row_index}:O{row_index}" if sheet == SHEET_NAME else f"{sheet}!A{row_index}:C{row_index}"
         url = f"{SHEET_UPDATE_BASE}{range_str}?valueInputOption=RAW"
         requests.put(url, headers=sheets_headers(), json={"values": [row]}, timeout=10)
-    except Exception as e:
-        print(f"[Sheets] Update error: {e}")
+    except: pass
 
 def find_warning_by_id(warning_id):
     for i, row in enumerate(read_all_rows()):
@@ -120,7 +115,7 @@ def get_verified_roblox_id(discord_id: str) -> str:
         for row in rows[1:]:
             if row and row[0].strip() == str(discord_id).strip():
                 return row[1].strip()
-    except Exception: pass
+    except: pass
     return None
 
 def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
@@ -128,8 +123,7 @@ def save_oauth_state_to_cloud(state_token: str, discord_user_id: int):
         ts = str(int(time.time()))
         payload = {"values": [[str(state_token), str(discord_user_id), ts]]}
         requests.post(STATE_APPEND_URL, headers=sheets_headers(), json=payload, timeout=10)
-    except Exception as e:
-        print(f"[Cloud State Error] {e}")
+    except Exception as e: print(f"[Cloud State Error] {e}")
 
 def pop_oauth_state_from_cloud(state_token: str) -> str:
     for attempt in range(5):
@@ -146,8 +140,7 @@ def pop_oauth_state_from_cloud(state_token: str) -> str:
                         update_row(i + 2, STATE_SHEET_NAME, ["", "", ""])
                         return discord_id
             time.sleep(1)
-        except Exception as e:
-            pass
+        except: pass
     return None
 
 # ── Roles Backup Helpers ───────────────────────────────────────────────────────
@@ -445,14 +438,25 @@ def build_historical_log_embed(title: str, warnings: list, thumb: str = None) ->
 async def setprefix(interaction: discord.Interaction, prefix: str):
     await interaction.response.defer(ephemeral=True)
     clean = prefix.strip()
+    
+    # 🛑 1. Block completely blank prefixes
+    if not clean:
+        return await interaction.followup.send("❌ **Error:** You cannot leave the prefix blank.", ephemeral=True)
+        
     if len(clean) > 5: return await interaction.followup.send("❌ Max 5 characters.", ephemeral=True)
     if re.sub(r'[^A-Za-z0-9]', '', clean).upper() in ("CEO", "VCEO"): return await interaction.followup.send("❌ Restricted prefix.", ephemeral=True)
-    base = interaction.user.display_name.split(" - ")[-1].strip()
+    
+    # 🛑 2. Cleanly remove old prefix without breaking names that naturally have a hyphen
+    base = interaction.user.display_name
+    if " - " in base:
+        base = base.split(" - ", 1)[-1].strip()
+        
     new = f"{clean} - {base}"
     try:
         await interaction.user.edit(nick=new[:32])
         await interaction.followup.send(f"✅ Nickname updated to `{new[:32]}`", ephemeral=True)
-    except: await interaction.followup.send("❌ Discord blocked the rename. The bot's role needs to be higher than yours.", ephemeral=True)
+    except Exception as e: 
+        await interaction.followup.send(f"❌ Discord blocked the rename. Ensure bot's role is higher than yours. ({e})", ephemeral=True)
 
 @bot.tree.command(name="verify", description="Link your Roblox account securely")
 async def verify(interaction: discord.Interaction):
@@ -624,13 +628,28 @@ def roblox_callback():
             requests.post(VERIFY_APPEND_URL, headers=sheets_headers(), json={"values": [[str(did), str(user['sub']), user['preferred_username']]]}, timeout=10)
         except Exception as e: print(f"Sheet write error: {e}")
         
-        async def sync_rename():
+        # 🚀 RESTORED: Sync Nickname AND Send Direct Message
+        async def sync_rename_and_dm():
+            # 1. Send the Success DM
+            try:
+                u = await bot.fetch_user(int(did))
+                if u:
+                    embed = discord.Embed(title="✅ Account Verification Complete!", description="Your server profile has been linked and your nickname synced to your Roblox account.", color=discord.Color.green())
+                    embed.add_field(name="Roblox Username", value=f"[{user['preferred_username']}](https://www.roblox.com/users/{user['sub']}/profile)", inline=True)
+                    embed.add_field(name="Roblox ID", value=f"`{user['sub']}`", inline=True)
+                    await u.send(embed=embed)
+            except Exception as e:
+                print(f"DM Error: {e}")
+
+            # 2. Rename the user in all shared servers
             for g in bot.guilds:
                 try:
                     m = await g.fetch_member(int(did))
                     if m: await m.edit(nick=user['preferred_username'][:32], reason="Auto-Verify Sync")
-                except: pass
-        bot.loop.create_task(sync_rename())
+                except Exception as e:
+                    print(f"Rename Error: {e}")
+                    
+        bot.loop.create_task(sync_rename_and_dm())
         
         html = f"""
         <html><head><title>Success</title><style>body {{font-family: sans-serif; background: #0f172a; color: white; text-align: center; padding-top: 100px;}} .card {{background: #1e293b; max-width: 400px; margin: auto; padding: 40px; border-radius: 12px;}} h1 {{color: #22c55e;}}</style></head>
