@@ -10,8 +10,6 @@ import json
 import re
 import asyncio
 from flask import Flask
-from flask import Flask, request, redirect, session
-import asyncio
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -538,7 +536,13 @@ def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_u
     embed.add_field(name="✅ Historical Archive (Revoked/Cleared Logs)", value=f"```text\n{revoked_txt.strip()}\n```", inline=False)
     embed.timestamp = datetime.datetime.utcnow()
     return embed
-
+async def update_discord_member(discord_id, new_nick):
+    guild = bot.guilds[0]
+    try:
+        member = await guild.fetch_member(int(discord_id))
+        await member.edit(nick=new_nick)
+    except Exception as e:
+        print(f"Failed to update nickname: {e}")
 # ── Slash Commands ─────────────────────────────────────────────────────────────
 @bot.tree.command(name="send_message", description="[Admin] Dispatch an announcement message or copy-paste an embed JSON structure into a channel")
 @app_commands.describe(channel_id="The numerical unique ID of your target channel", message="Optional basic markdown text message content", embed_json="Optional copy-pasted embed code structured in valid JSON profile")
@@ -580,7 +584,20 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
         await interaction.followup.send(f"❌ **API Error:** The bot profile is missing permission fields required to write data inside <#{cleaned_chan_id}>.")
     except Exception as e:
         await interaction.followup.send(f"❌ **Transmission Error:** System failed to dispatch payload file.\n```text\n{e}\n```")
-
+@bot.tree.command(name="verify", description="Link your Roblox account")
+async def verify(interaction: discord.Interaction):
+    state = str(interaction.user.id)
+    auth_url = (
+        f"https://www.roblox.com/oauth/authorize?"
+        f"client_id={os.environ.get('ROBLOX_CLIENT_ID')}&"
+        f"response_type=code&"
+        f"redirect_uri=https://bot-h57e.onrender.com/callback&"
+        f"scope=openid+profile&"
+        f"state={state}"
+    )
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Login with Roblox", url=auth_url))
+    await interaction.response.send_message("Click below to link your Roblox account:", view=view, ephemeral=True)
 @bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and instantly lift its punishment")
 @app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
 async def revokeaction(interaction: discord.Interaction, case_id: str):
@@ -748,55 +765,6 @@ async def ban_cmd(interaction: discord.Interaction, user_target: str, reason: st
     # Hand off standard temporal data formats (YYYY-MM-DD) natively
     clean_end_date = end_date.strip() if end_date else "Never"
     await run_moderation_action(interaction, cleaned_id, target_name, target_member, reason, "Ban", source.value if source else "Discord", clean_end_date)
-@bot.tree.command(name="verify", description="Link your Roblox account to update your nickname")
-async def verify(interaction: discord.Interaction):
-    # Pass the Discord User ID as the 'state' to keep track of who is logging in
-    state = str(interaction.user.id)
-    auth_url = (
-        f"https://www.roblox.com/oauth/authorize?"
-        f"client_id={os.environ.get('ROBLOX_CLIENT_ID')}&"
-        f"response_type=code&"
-        f"redirect_uri=https://bot-h57e.onrender.com/callback&"
-        f"scope=openid+profile&"
-        f"state={state}"
-    )
-    
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="Login with Roblox", url=auth_url))
-    await interaction.response.send_message("Click the button below to link your Roblox account:", view=view, ephemeral=True) 
-@app.route('/callback')
-def callback():
-    code = request.args.get('code')
-    discord_id = request.args.get('state') # The ID we sent in the /verify command
-
-    # 1. Exchange code for Token
-    token_resp = requests.post("https://apis.roblox.com/oauth/v1/token", data={
-        "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
-        "client_secret": os.environ.get("ROBLOX_CLIENT_SECRET"),
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": "https://bot-h57e.onrender.com/callback"
-    }).json()
-
-    # 2. Get Roblox Username
-    user_info = requests.get("https://apis.roblox.com/oauth/v1/userinfo", 
-                             headers={"Authorization": f"Bearer {token_resp['access_token']}"}).json()
-    
-    roblox_name = user_info.get("preferred_username")
-
-    # 3. Queue the nickname update in the bot's thread
-    bot.loop.create_task(update_discord_member(discord_id, roblox_name))
-    
-    return "Verification successful! Your Discord nickname has been updated. You can close this window."
-
-async def update_discord_member(discord_id, new_nick):
-    # This assumes the bot is in a single guild. Adjust if using multiple.
-    guild = bot.guilds[0] 
-    try:
-        member = await guild.fetch_member(int(discord_id))
-        await member.edit(nick=new_nick)
-    except Exception as e:
-        print(f"Failed to update nickname: {e}")
 
 @bot.tree.command(name="staff_suspension", description="[Admin] Suspend a staff member and strip non-protected roles")
 @app_commands.describe(user="The staff member profile", reason="Reason for suspension", source="Platform context", end_date="Expiry date (YYYY-MM-DD) REQUIRED")
@@ -854,8 +822,38 @@ async def restoreroles(interaction: discord.Interaction):
 
 # ── Production Flask Engine Server ─────────────────────────────────────────────
 app = Flask(__name__)
+
 @app.route('/')
 def home(): return "BWR7 Warnings Bot is Online Framework Stable!", 200
+
+@app.route('/callback')
+def callback():
+    code = request.args.get('code')
+    discord_id = request.args.get('state')
+    
+    token_resp = requests.post("https://apis.roblox.com/oauth/v1/token", data={
+        "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
+        "client_secret": os.environ.get("ROBLOX_CLIENT_SECRET"),
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": "https://bot-h57e.onrender.com/callback"
+    }).json()
+
+    user_info = requests.get("https://apis.roblox.com/oauth/v1/userinfo", 
+                             headers={"Authorization": f"Bearer {token_resp['access_token']}"}).json()
+    
+    roblox_name = user_info.get("preferred_username")
+    bot.loop.create_task(update_discord_member(discord_id, roblox_name))
+    
+    return "Verification successful! You can close this window."
+
+@app.route('/privacy')
+def privacy():
+    return "Privacy Policy: We use your Roblox username to update your Discord nickname.", 200
+
+@app.route('/terms')
+def terms():
+    return "Terms of Service: By verifying, you consent to the bot updating your nickname.", 200
 
 def run_discord_bot():
     if not DISCORD_TOKEN: return
