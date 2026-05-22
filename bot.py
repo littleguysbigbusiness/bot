@@ -26,14 +26,16 @@ VERIFIED_USERS_SHEET = "VerifiedUsers"
 TEMP_STATES_SHEET    = "TempStates"
 
 def temp_states_add(token: str, discord_id: str):
-    """Write a pending token -> discord_id pair to TempStates sheet."""
+    """Write a pending token -> discord_id pair to TempStates sheet with expiry timestamp."""
+    expiry = (datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
     try:
-        requests.post(TEMP_STATES_APPEND_URL, headers=sheets_headers(), json={"values": [[token, discord_id]]}, timeout=10)
+        requests.post(TEMP_STATES_APPEND_URL, headers=sheets_headers(), json={"values": [[token, discord_id, expiry]]}, timeout=10)
     except Exception as e:
         print(f"[TempStates] Write error: {e}")
 
 def temp_states_pop(token: str):
-    """Look up and delete a token from TempStates. Returns discord_id or None."""
+    """Look up, validate expiry, and delete a token from TempStates.
+    Returns discord_id string, "EXPIRED" if token timed out, or None if not found."""
     try:
         resp = requests.get(TEMP_STATES_READ_URL, headers=sheets_headers(), timeout=10)
         rows = resp.json().get("values", [])
@@ -44,16 +46,50 @@ def temp_states_pop(token: str):
     for i, row in enumerate(rows):
         if len(row) >= 2 and row[0].strip() == token.strip():
             discord_id = row[1].strip()
-            # Delete the row by clearing it
+            expiry_str = row[2].strip() if len(row) >= 3 else None
+
+            # Always clear the row first (one-time use)
             sheet_row = i + 1
-            range_str = f"{TEMP_STATES_SHEET}!A{sheet_row}:B{sheet_row}"
-            url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
+            range_str = f"{TEMP_STATES_SHEET}!A{sheet_row}:C{sheet_row}"
+            clear_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
             try:
-                requests.post(url, headers=sheets_headers(), timeout=10)
+                requests.post(clear_url, headers=sheets_headers(), timeout=10)
             except Exception as e:
                 print(f"[TempStates] Clear error: {e}")
+
+            # Check expiry
+            if expiry_str:
+                try:
+                    expiry_dt = datetime.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M:%S")
+                    if datetime.datetime.utcnow() > expiry_dt:
+                        print(f"[TempStates] Token expired for discord_id {discord_id}")
+                        return "EXPIRED"
+                except Exception:
+                    pass
+
             return discord_id
     return None
+
+def temp_states_purge_expired():
+    """Remove all expired rows from TempStates sheet."""
+    try:
+        resp = requests.get(TEMP_STATES_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        now = datetime.datetime.utcnow()
+        for i, row in enumerate(rows):
+            if len(row) >= 3:
+                try:
+                    expiry_dt = datetime.datetime.strptime(row[2].strip(), "%Y-%m-%dT%H:%M:%S")
+                    if now > expiry_dt:
+                        sheet_row = i + 1
+                        range_str = f"{TEMP_STATES_SHEET}!A{sheet_row}:C{sheet_row}"
+                        url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
+                        requests.post(url, headers=sheets_headers(), timeout=10)
+                        print(f"[TempStates] Purged expired row {sheet_row}")
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[TempStates] Purge error: {e}")
 
 def verified_users_log(discord_id: str, roblox_user_id: str, roblox_username: str):
     """Append or update a verified user record in VerifiedUsers sheet."""
@@ -108,9 +144,20 @@ def callback():
 
     # Resolve and consume the state token -> discord_id
     discord_id = temp_states_pop(state_token)
+    if discord_id == "EXPIRED":
+        print(f"[Callback] FAILED: Token expired")
+        return (
+            "⛔ Verification session expired. Your link is only valid for 5 minutes. "
+            "Please run /verify again in Discord to get a fresh link. "
+            "If you believe this is an error, contact a server administrator.", 400
+        )
     if not discord_id:
-        print(f"[Callback] FAILED: Token not found in TempStates sheet")
-        return "Error: Invalid or expired verification session. Please run /verify again.", 400
+        print(f"[Callback] FAILED: Token not found — possible bot/replay attack")
+        return (
+            "⛔ Invalid verification session. This link has already been used or does not exist. "
+            "If you are trying to verify, please run /verify in Discord. "
+            "Repeated invalid attempts may be flagged as suspicious activity.", 400
+        )
 
     # Token exchange
     try:
@@ -190,8 +237,8 @@ SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
 
-TEMP_STATES_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B"
-TEMP_STATES_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+TEMP_STATES_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:C"
+TEMP_STATES_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 VERIFIED_USERS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C"
 VERIFIED_USERS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
@@ -375,6 +422,8 @@ class WarningsBot(commands.Bot):
             update_status_embed.start()
         if not automatic_expiry_sweeper.is_running():
             automatic_expiry_sweeper.start()
+        if not temp_states_cleanup.is_running():
+            temp_states_cleanup.start()
 
 bot = WarningsBot()
 
@@ -425,6 +474,12 @@ async def update_status_embed():
                 pass
     except Exception:
         pass
+
+@tasks.loop(minutes=5)
+async def temp_states_cleanup():
+    """Purge expired TempStates rows every 5 minutes."""
+    await bot.wait_until_ready()
+    temp_states_purge_expired()
 
 @tasks.loop(hours=24)
 async def automatic_expiry_sweeper():
@@ -770,17 +825,12 @@ def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_u
     return embed
 
 # ── Slash Commands ─────────────────────────────────────────────────────────────
-@bot.tree.command(name="verify", description="Link your Roblox account")
-async def verify(interaction: discord.Interaction):
-    if is_already_verified(interaction.user.id):
-        await interaction.response.send_message(
-            "You're already verified! Use `/reverify` to re-link.", ephemeral=True
-        )
-        return
+BANNED_PREFIXES = ["CEO", "VCEO"]
 
+def build_verify_url(discord_id: str) -> str:
+    """Generate a fresh OAuth URL and store the state token."""
     state_token = secrets.token_urlsafe(32)
-    temp_states_add(state_token, str(interaction.user.id))
-
+    temp_states_add(state_token, discord_id)
     params = urllib.parse.urlencode({
         "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
         "response_type": "code",
@@ -788,15 +838,101 @@ async def verify(interaction: discord.Interaction):
         "scope": "openid profile",
         "state": state_token
     })
-    auth_url = f"https://apis.roblox.com/oauth/v1/authorize?{params}"
+    return f"https://apis.roblox.com/oauth/v1/authorize?{params}"
 
+@bot.tree.command(name="verify", description="Link your Roblox account to Discord")
+async def verify(interaction: discord.Interaction):
+    if is_already_verified(interaction.user.id):
+        await interaction.response.send_message(
+            "✅ You are already verified! Use `/reverify` to re-link your account.", ephemeral=True
+        )
+        return
+
+    auth_url = build_verify_url(str(interaction.user.id))
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Login with Roblox", url=auth_url))
     await interaction.response.send_message(
-        "Click below to link your Roblox account.\nThis link is personal — do not share it.",
+        "🔗 Click below to link your Roblox account.\n"
+        "⚠️ This link is **personal** — do not share it.\n"
+        "⏱️ The link expires in **5 minutes**.",
         view=view,
         ephemeral=True
     )
+
+@bot.tree.command(name="reverify", description="Re-link your Roblox account to Discord")
+async def reverify(interaction: discord.Interaction):
+    auth_url = build_verify_url(str(interaction.user.id))
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Re-link with Roblox", url=auth_url))
+    await interaction.response.send_message(
+        "🔗 Click below to re-link your Roblox account.\n"
+        "⚠️ This link is **personal** — do not share it.\n"
+        "⏱️ The link expires in **5 minutes**.",
+        view=view,
+        ephemeral=True
+    )
+
+@bot.tree.command(name="setprefix", description="Set a custom prefix for your nickname (e.g. Driver-YourName)")
+@app_commands.describe(prefix="Your desired prefix (e.g. Driver, Trainer). CEO and VCEO are not allowed.")
+async def setprefix(interaction: discord.Interaction, prefix: str):
+    await interaction.response.defer(ephemeral=True)
+
+    # Check banned prefixes (case-insensitive)
+    prefix_upper = prefix.strip().upper()
+    for banned in BANNED_PREFIXES:
+        if prefix_upper == banned or prefix_upper.startswith(banned):
+            await interaction.followup.send(
+                f"❌ The prefix `{prefix}` is not allowed. `CEO` and `VCEO` are reserved prefixes.",
+                ephemeral=True
+            )
+            return
+
+    # Must be verified first
+    if not is_already_verified(interaction.user.id):
+        await interaction.followup.send(
+            "❌ You must be verified first. Run `/verify` to link your Roblox account.",
+            ephemeral=True
+        )
+        return
+
+    # Get their Roblox username from VerifiedUsers sheet
+    try:
+        resp = requests.get(VERIFIED_USERS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        roblox_username = None
+        for row in rows:
+            if len(row) >= 3 and row[0].strip() == str(interaction.user.id):
+                roblox_username = row[2].strip()
+                break
+    except Exception as e:
+        await interaction.followup.send(f"❌ Could not fetch your Roblox username: {e}", ephemeral=True)
+        return
+
+    if not roblox_username:
+        await interaction.followup.send(
+            "❌ Could not find your Roblox username on record. Try `/reverify`.",
+            ephemeral=True
+        )
+        return
+
+    new_nick = f"{prefix.strip()}-{roblox_username}"
+
+    # Discord nickname max length is 32 chars
+    if len(new_nick) > 32:
+        await interaction.followup.send(
+            f"❌ The resulting nickname `{new_nick}` is too long ({len(new_nick)}/32 chars). Use a shorter prefix.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        member = interaction.guild.get_member(interaction.user.id) or await interaction.guild.fetch_member(interaction.user.id)
+        await member.edit(nick=new_nick)
+        await interaction.followup.send(f"✅ Your nickname has been updated to `{new_nick}`.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to change your nickname.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to update nickname: {e}", ephemeral=True)
 
 @bot.tree.command(name="send_message", description="[Admin] Dispatch an announcement or embed JSON into a channel")
 @app_commands.describe(channel_id="The numerical unique ID of your target channel", message="Optional text message content", embed_json="Optional embed structured in valid JSON")
