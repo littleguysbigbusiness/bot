@@ -27,33 +27,71 @@ def home():
 @app.route('/callback', methods=['GET'])
 def callback():
     code = request.args.get('code')
-    discord_id = request.args.get('state')
-    
+    state_token = request.args.get('state')
+
     if not code:
         return "Error: No code received.", 400
+    if not state_token:
+        return "Error: Missing state parameter.", 400
 
-    # Token exchange logic
-    token_resp = requests.post("https://apis.roblox.com/oauth/v1/token", data={
-        "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
-        "client_secret": os.environ.get("ROBLOX_CLIENT_SECRET"),
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": "https://bot-h57e.onrender.com/callback" # No underscore here!
-    }).json()
+    # Resolve and consume the state token -> discord_id
+    discord_id = pending_verifications.pop(state_token, None)
+    if not discord_id:
+        return "Error: Invalid or expired verification session.", 400
+
+    # Token exchange
+    try:
+        token_resp = requests.post(
+            "https://apis.roblox.com/oauth/v1/token",
+            data={
+                "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
+                "client_secret": os.environ.get("ROBLOX_CLIENT_SECRET"),
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "https://bot-h57e.onrender.com/callback"
+            },
+            timeout=10
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+    except requests.RequestException as e:
+        print(f"Token exchange failed: {e}")
+        return "Error: Token exchange failed.", 502
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        print(f"No access token in response: {token_data}")
+        return "Error: Authorization failed.", 400
 
     # Get user info
-    if "access_token" in token_resp:
-        user_info = requests.get("https://apis.roblox.com/oauth/v1/userinfo", 
-                                 headers={"Authorization": f"Bearer {token_resp['access_token']}"}).json()
-        
-        roblox_name = user_info.get("preferred_username")
-        
-        if discord_id and roblox_name:
-            bot.loop.create_task(update_discord_member(discord_id, roblox_name))
-            return "Verification successful! You can close this window."
-    
-    return "Error: Could not link account.", 500
+    try:
+        user_resp = requests.get(
+            "https://apis.roblox.com/oauth/v1/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10
+        )
+        user_resp.raise_for_status()
+        user_info = user_resp.json()
+    except requests.RequestException as e:
+        print(f"User info fetch failed: {e}")
+        return "Error: Could not fetch user info.", 502
 
+    roblox_name = user_info.get("preferred_username")
+    if not roblox_name:
+        return "Error: Could not retrieve Roblox username.", 400
+
+    # Thread-safe scheduling from Flask's sync thread
+    future = asyncio.run_coroutine_threadsafe(
+        update_discord_member(discord_id, roblox_name),
+        bot.loop
+    )
+    try:
+        future.result(timeout=10)
+    except Exception as e:
+        print(f"Discord update failed: {e}")
+        return "Error: Could not update Discord member.", 500
+
+    return "Verification successful! You can close this window.", 200
 @app.route('/privacy')
 def privacy():
     return "Privacy Policy: We use your Roblox username solely to update your Discord nickname for community identification purposes. No other personal data is collected or stored.", 200
@@ -637,22 +675,42 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
         await interaction.followup.send(f"❌ **API Error:** The bot profile is missing permission fields required to write data inside <#{cleaned_chan_id}>.")
     except Exception as e:
         await interaction.followup.send(f"❌ **Transmission Error:** System failed to dispatch payload file.\n```text\n{e}\n```")
+import secrets
+import urllib.parse
+
+# Store pending verifications: token -> discord_user_id
+# (use Redis/DB in production instead of this in-memory dict)
+pending_verifications: dict[str, str] = {}
 
 @bot.tree.command(name="verify", description="Link your Roblox account")
 async def verify(interaction: discord.Interaction):
-    state = str(interaction.user.id)
-    auth_url = (
-        f"https://www.roblox.com/oauth/authorize?"
-        f"client_id={os.environ.get('ROBLOX_CLIENT_ID')}&"
-        f"response_type=code&"
-        f"redirect_uri=https://bot-h57e.onrender.com/callback&"
-        f"scope=openid+profile&"
-        f"state={state}"
-    )
+    # Optional: check if already verified
+    if is_already_verified(interaction.user.id):  # implement this against your DB
+        await interaction.response.send_message(
+            "You're already verified! Use `/reverify` to re-link.", ephemeral=True
+        )
+        return
+
+    # Secure random state token instead of raw user ID
+    state_token = secrets.token_urlsafe(32)
+    pending_verifications[state_token] = str(interaction.user.id)
+
+    params = urllib.parse.urlencode({
+        "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
+        "response_type": "code",
+        "redirect_uri": "https://bot-h57e.onrender.com/callback",
+        "scope": "openid profile",
+        "state": state_token
+    })
+    auth_url = f"https://www.roblox.com/oauth/authorize?{params}"
+
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Login with Roblox", url=auth_url))
-    await interaction.response.send_message("Click below to link your Roblox account:", view=view, ephemeral=True)
-
+    await interaction.response.send_message(
+        "Click below to link your Roblox account.\nThis link is personal — do not share it.",
+        view=view,
+        ephemeral=True
+    )
 @bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and instantly lift its punishment")
 @app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
 async def revokeaction(interaction: discord.Interaction, case_id: str):
