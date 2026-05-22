@@ -26,7 +26,7 @@ def callback():
     if not code:
         return "Error: No authorization code provided by Roblox.", 400
 
-    token_resp = requests.post("https://apis.roblox.com/oauth/v1/token", data={
+    token_resp = requests.post("authorize.roblox.com", data={
         "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
         "client_secret": os.environ.get("ROBLOX_CLIENT_SECRET"),
         "grant_type": "authorization_code",
