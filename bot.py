@@ -9,7 +9,7 @@ import threading
 import json
 import re
 import asyncio
-from flask import Flask
+from flask import Flask, request
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
