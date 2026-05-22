@@ -708,7 +708,7 @@ async def verify(interaction: discord.Interaction):
         "scope": "openid profile",
         "state": state_token
     })
-    auth_url = f"https://www.roblox.com/oauth/authorize?{params}"
+    auth_url = f"https://apis.roblox.com/oauth/v1/authorize?{params}"
 
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Login with Roblox", url=auth_url))
