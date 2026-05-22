@@ -31,15 +31,21 @@ def callback():
     code = request.args.get('code')
     state_token = request.args.get('state')
 
+    print(f"[Callback] code={'YES' if code else 'MISSING'}, state_token={'YES' if state_token else 'MISSING'}")
+    print(f"[Callback] Known tokens: {list(pending_verifications.keys())}")
+
     if not code:
+        print("[Callback] FAILED: No code received")
         return "Error: No code received.", 400
     if not state_token:
+        print("[Callback] FAILED: No state token")
         return "Error: Missing state parameter.", 400
 
     # Resolve and consume the state token -> discord_id
     discord_id = pending_verifications.pop(state_token, None)
     if not discord_id:
-        return "Error: Invalid or expired verification session.", 400
+        print(f"[Callback] FAILED: Token not found in pending_verifications")
+        return "Error: Invalid or expired verification session. Please run /verify again.", 400
 
     # Token exchange
     try:
@@ -708,8 +714,7 @@ async def verify(interaction: discord.Interaction):
         "scope": "openid profile",
         "state": state_token
     })
-    auth_url = f"https://www.roblox.com/upgrades/robux?ctx=navpopover"
-
+    auth_url = f"https://apis.roblox.com/oauth/v1/authorize?{params}"
 
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Login with Roblox", url=auth_url))
