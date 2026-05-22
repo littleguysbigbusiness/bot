@@ -22,14 +22,8 @@ app = Flask(__name__)
 # Uses the TempStates sheet (columns: A=token, B=discord_id) instead of
 # an in-memory dict, so Render restarts don't wipe pending sessions.
 
-VERIFIED_USERS_SHEET  = "VerifiedUsers"
-TEMP_STATES_SHEET     = "TempStates"
-
-TEMP_STATES_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B"
-TEMP_STATES_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
-
-VERIFIED_USERS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C"
-VERIFIED_USERS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+VERIFIED_USERS_SHEET = "VerifiedUsers"
+TEMP_STATES_SHEET    = "TempStates"
 
 def temp_states_add(token: str, discord_id: str):
     """Write a pending token -> discord_id pair to TempStates sheet."""
@@ -196,6 +190,12 @@ GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
+
+TEMP_STATES_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B"
+TEMP_STATES_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+
+VERIFIED_USERS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C"
+VERIFIED_USERS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 ROLES_BACKUP_FILE = "suspended_roles.json"
 
