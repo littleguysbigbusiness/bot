@@ -934,8 +934,22 @@ async def setprefix(interaction: discord.Interaction, prefix: str):
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to update nickname: {e}", ephemeral=True)
 
-@bot.tree.command(name="send_message", description="[Admin] Dispatch an announcement or embed JSON into a channel")
-@app_commands.describe(channel_id="The numerical unique ID of your target channel", message="Optional text message content", embed_json="Optional embed structured in valid JSON")
+def parse_embed_json(embed_json: str):
+    """Parse a JSON string into a discord.Embed. Raises on failure."""
+    clean_json = embed_json.strip()
+    if clean_json.startswith("```json"): clean_json = clean_json[7:]
+    elif clean_json.startswith("```"): clean_json = clean_json[3:]
+    if clean_json.endswith("```"): clean_json = clean_json[:-3]
+    data = json.loads(clean_json.strip())
+    embed_dict = data["embeds"][0] if "embeds" in data and data["embeds"] else data
+    return discord.Embed.from_dict(embed_dict)
+
+@bot.tree.command(name="send_message", description="[Admin] Send a new message or embed into a channel")
+@app_commands.describe(
+    channel_id="The numerical ID of the target channel",
+    message="Optional plain text content",
+    embed_json="Optional embed in JSON format"
+)
 async def send_message(interaction: discord.Interaction, channel_id: str, message: str = None, embed_json: str = None):
     if not is_admin(interaction):
         return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
@@ -945,32 +959,79 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
     target_channel = bot.get_channel(int(cleaned_chan_id))
 
     if not target_channel:
-        return await interaction.followup.send(f"❌ **Error:** Target channel ID `{cleaned_chan_id}` could not be located.")
-
+        return await interaction.followup.send(f"❌ **Error:** Channel `{cleaned_chan_id}` could not be located.")
     if not message and not embed_json:
-        return await interaction.followup.send("❌ **Error:** You must provide either a `message` or `embed_json`.")
+        return await interaction.followup.send("❌ **Error:** Provide either a `message` or `embed_json`.")
 
     target_embed = None
     if embed_json:
         try:
-            clean_json = embed_json.strip()
-            if clean_json.startswith("```json"): clean_json = clean_json[7:]
-            elif clean_json.startswith("```"): clean_json = clean_json[3:]
-            if clean_json.endswith("```"): clean_json = clean_json[:-3]
-
-            data = json.loads(clean_json.strip())
-            embed_dict = data["embeds"][0] if "embeds" in data and data["embeds"] else data
-            target_embed = discord.Embed.from_dict(embed_dict)
+            target_embed = parse_embed_json(embed_json)
         except Exception as e:
-            return await interaction.followup.send(f"❌ **JSON Formatting Error:**\n```text\n{e}\n```")
+            return await interaction.followup.send(f"❌ **JSON Error:**\n```text\n{e}\n```")
 
     try:
         await target_channel.send(content=message, embed=target_embed)
-        await interaction.followup.send(f"✅ **Success!** Message transmitted to <#{cleaned_chan_id}>.")
+        await interaction.followup.send(f"✅ Message sent to <#{cleaned_chan_id}>.")
     except discord.Forbidden:
-        await interaction.followup.send(f"❌ **API Error:** Missing permissions to write inside <#{cleaned_chan_id}>.")
+        await interaction.followup.send(f"❌ Missing permissions to write in <#{cleaned_chan_id}>.")
     except Exception as e:
-        await interaction.followup.send(f"❌ **Transmission Error:**\n```text\n{e}\n```")
+        await interaction.followup.send(f"❌ **Error:**\n```text\n{e}\n```")
+
+@bot.tree.command(name="edit_message", description="[Admin] Edit an existing bot message by its ID")
+@app_commands.describe(
+    channel_id="The channel the message is in",
+    message_id="The ID of the message to edit",
+    new_content="New plain text content (leave blank to keep existing)",
+    embed_json="New embed JSON (leave blank to keep existing)"
+)
+async def edit_message(interaction: discord.Interaction, channel_id: str, message_id: str, new_content: str = None, embed_json: str = None):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    if not new_content and not embed_json:
+        return await interaction.followup.send("❌ Provide at least a `new_content` or `embed_json` to update.")
+
+    cleaned_chan_id = extract_id(channel_id)
+    cleaned_msg_id  = extract_id(message_id)
+
+    target_channel = bot.get_channel(int(cleaned_chan_id))
+    if not target_channel:
+        return await interaction.followup.send(f"❌ Channel `{cleaned_chan_id}` not found.")
+
+    try:
+        target_msg = await target_channel.fetch_message(int(cleaned_msg_id))
+    except discord.NotFound:
+        return await interaction.followup.send(f"❌ Message `{cleaned_msg_id}` not found in <#{cleaned_chan_id}>.")
+    except discord.Forbidden:
+        return await interaction.followup.send("❌ Missing permissions to read that channel.")
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Could not fetch message:\n```text\n{e}\n```")
+
+    if target_msg.author.id != bot.user.id:
+        return await interaction.followup.send("❌ That message was not sent by this bot — I can only edit my own messages.")
+
+    # Build new embed if provided, else keep existing
+    new_embed = None
+    if embed_json:
+        try:
+            new_embed = parse_embed_json(embed_json)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ **JSON Error:**\n```text\n{e}\n```")
+    elif target_msg.embeds:
+        new_embed = target_msg.embeds[0]  # preserve existing embed if not replacing
+
+    try:
+        await target_msg.edit(
+            content=new_content if new_content else target_msg.content or None,
+            embed=new_embed
+        )
+        await interaction.followup.send(f"✅ Message `{cleaned_msg_id}` updated successfully in <#{cleaned_chan_id}>.")
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Missing permissions to edit that message.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ **Edit failed:**\n```text\n{e}\n```")
 
 @bot.tree.command(name="revokeaction", description="[Admin] Revoke an active moderation file and lift its punishment")
 @app_commands.describe(case_id="The Case ID to revoke (e.g. AB12CD34)")
