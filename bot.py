@@ -18,8 +18,80 @@ from google.auth.transport.requests import Request
 # ── Flask Initialization ────────────────────────────────────────────────────────
 app = Flask(__name__)
 
-# ── Pending Verifications (must be before /callback route) ─────────────────────
-pending_verifications: dict[str, str] = {}
+# ── Sheet-backed Pending Verifications ────────────────────────────────────────
+# Uses the TempStates sheet (columns: A=token, B=discord_id) instead of
+# an in-memory dict, so Render restarts don't wipe pending sessions.
+
+VERIFIED_USERS_SHEET  = "VerifiedUsers"
+TEMP_STATES_SHEET     = "TempStates"
+
+TEMP_STATES_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B"
+TEMP_STATES_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TEMP_STATES_SHEET}!A:B:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+
+VERIFIED_USERS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C"
+VERIFIED_USERS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{VERIFIED_USERS_SHEET}!A:C:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+
+def temp_states_add(token: str, discord_id: str):
+    """Write a pending token -> discord_id pair to TempStates sheet."""
+    try:
+        requests.post(TEMP_STATES_APPEND_URL, headers=sheets_headers(), json={"values": [[token, discord_id]]}, timeout=10)
+    except Exception as e:
+        print(f"[TempStates] Write error: {e}")
+
+def temp_states_pop(token: str):
+    """Look up and delete a token from TempStates. Returns discord_id or None."""
+    try:
+        resp = requests.get(TEMP_STATES_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+    except Exception as e:
+        print(f"[TempStates] Read error: {e}")
+        return None
+
+    for i, row in enumerate(rows):
+        if len(row) >= 2 and row[0].strip() == token.strip():
+            discord_id = row[1].strip()
+            # Delete the row by clearing it
+            sheet_row = i + 1
+            range_str = f"{TEMP_STATES_SHEET}!A{sheet_row}:B{sheet_row}"
+            url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
+            try:
+                requests.post(url, headers=sheets_headers(), timeout=10)
+            except Exception as e:
+                print(f"[TempStates] Clear error: {e}")
+            return discord_id
+    return None
+
+def verified_users_log(discord_id: str, roblox_user_id: str, roblox_username: str):
+    """Append or update a verified user record in VerifiedUsers sheet."""
+    try:
+        # Check if already exists and update
+        resp = requests.get(VERIFIED_USERS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if len(row) >= 1 and row[0].strip() == str(discord_id).strip():
+                sheet_row = i + 1
+                range_str = f"{VERIFIED_USERS_SHEET}!A{sheet_row}:C{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}?valueInputOption=RAW"
+                requests.put(url, headers=sheets_headers(), json={"values": [[discord_id, roblox_user_id, roblox_username]]}, timeout=10)
+                print(f"[VerifiedUsers] Updated existing record for Discord ID {discord_id}")
+                return
+        # Not found, append new row
+        requests.post(VERIFIED_USERS_APPEND_URL, headers=sheets_headers(), json={"values": [[discord_id, roblox_user_id, roblox_username]]}, timeout=10)
+        print(f"[VerifiedUsers] Logged new verified user: {discord_id} -> {roblox_username}")
+    except Exception as e:
+        print(f"[VerifiedUsers] Log error: {e}")
+
+def is_already_verified(user_id: int) -> bool:
+    """Check VerifiedUsers sheet for an existing Discord ID entry."""
+    try:
+        resp = requests.get(VERIFIED_USERS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for row in rows:
+            if len(row) >= 1 and row[0].strip() == str(user_id).strip():
+                return True
+    except Exception as e:
+        print(f"[VerifiedUsers] Check error: {e}")
+    return False
 
 # ── Flask Routes ───────────────────────────────────────────────────────────────
 @app.route('/')
@@ -42,9 +114,9 @@ def callback():
         return "Error: Missing state parameter.", 400
 
     # Resolve and consume the state token -> discord_id
-    discord_id = pending_verifications.pop(state_token, None)
+    discord_id = temp_states_pop(state_token)
     if not discord_id:
-        print(f"[Callback] FAILED: Token not found in pending_verifications")
+        print(f"[Callback] FAILED: Token not found in TempStates sheet")
         return "Error: Invalid or expired verification session. Please run /verify again.", 400
 
     # Token exchange
@@ -85,12 +157,13 @@ def callback():
         return "Error: Could not fetch user info.", 502
 
     roblox_name = user_info.get("preferred_username")
+    roblox_sub  = user_info.get("sub", "")  # Roblox user ID (stable, never changes)
     if not roblox_name:
         return "Error: Could not retrieve Roblox username.", 400
 
     # Thread-safe scheduling from Flask's sync thread
     future = asyncio.run_coroutine_threadsafe(
-        update_discord_member(discord_id, roblox_name),
+        update_discord_member(discord_id, roblox_sub, roblox_name),
         bot.loop
     )
     try:
@@ -315,9 +388,7 @@ def is_admin(interaction: discord.Interaction):
         m.guild_permissions.moderate_members
     )
 
-def is_already_verified(user_id: int) -> bool:
-    # Placeholder — replace with a real DB lookup later
-    return False
+
 
 async def dm_user(user, embed):
     try:
@@ -326,13 +397,17 @@ async def dm_user(user, embed):
     except discord.Forbidden:
         return False
 
-async def update_discord_member(discord_id, new_nick):
+async def update_discord_member(discord_id, roblox_user_id, roblox_username):
+    """Update Discord nickname and log to VerifiedUsers sheet."""
     guild = bot.guilds[0]
     try:
         member = await guild.fetch_member(int(discord_id))
-        await member.edit(nick=new_nick)
+        await member.edit(nick=roblox_username)
+        print(f"[Verify] Updated nickname for {discord_id} -> {roblox_username}")
     except Exception as e:
-        print(f"Failed to update nickname: {e}")
+        print(f"[Verify] Failed to update nickname: {e}")
+    # Log to sheet regardless of nickname success
+    verified_users_log(discord_id, roblox_user_id, roblox_username)
 
 # ── Background Tasks ───────────────────────────────────────────────────────────
 @tasks.loop(seconds=60)
@@ -705,7 +780,7 @@ async def verify(interaction: discord.Interaction):
         return
 
     state_token = secrets.token_urlsafe(32)
-    pending_verifications[state_token] = str(interaction.user.id)
+    temp_states_add(state_token, str(interaction.user.id))
 
     params = urllib.parse.urlencode({
         "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
