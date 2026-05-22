@@ -98,7 +98,6 @@ def callback():
     state_token = request.args.get('state')
 
     print(f"[Callback] code={'YES' if code else 'MISSING'}, state_token={'YES' if state_token else 'MISSING'}")
-    print(f"[Callback] Known tokens: {list(pending_verifications.keys())}")
 
     if not code:
         print("[Callback] FAILED: No code received")
