@@ -1,3 +1,8 @@
+from flask import Flask, request, redirect, session
+import requests
+import os
+import discord
+# ... (all your other imports)
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -18,35 +23,36 @@ app = Flask(__name__)
 def home():
     return "BWR7 Warnings Bot is Online Framework Stable!", 200
 
-@app.route('/callback')
+# Ensure the route matches the URL exactly
+@app.route('/callback', methods=['GET'])
 def callback():
     code = request.args.get('code')
     discord_id = request.args.get('state')
     
     if not code:
-        return "Error: No authorization code provided by Roblox.", 400
+        return "Error: No code received.", 400
 
-    token_resp = requests.post("authorize.roblox.com", data={
+    # Token exchange logic
+    token_resp = requests.post("https://apis.roblox.com/oauth/v1/token", data={
         "client_id": os.environ.get("ROBLOX_CLIENT_ID"),
         "client_secret": os.environ.get("ROBLOX_CLIENT_SECRET"),
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": "https://bot-h57e.onrender.com/callback"
+        "redirect_uri": "https://bot-h57e.onrender.com/callback" # No underscore here!
     }).json()
 
-    if "access_token" not in token_resp:
-        return f"Error exchanging token. Ensure your Roblox credentials and Redirect URI match exactly. Details: {token_resp}", 400
-
-    user_info = requests.get("https://apis.roblox.com/oauth/v1/userinfo", 
-                             headers={"Authorization": f"Bearer {token_resp['access_token']}"}).json()
+    # Get user info
+    if "access_token" in token_resp:
+        user_info = requests.get("https://apis.roblox.com/oauth/v1/userinfo", 
+                                 headers={"Authorization": f"Bearer {token_resp['access_token']}"}).json()
+        
+        roblox_name = user_info.get("preferred_username")
+        
+        if discord_id and roblox_name:
+            bot.loop.create_task(update_discord_member(discord_id, roblox_name))
+            return "Verification successful! You can close this window."
     
-    roblox_name = user_info.get("preferred_username")
-    
-    if discord_id and roblox_name:
-        bot.loop.create_task(update_discord_member(discord_id, roblox_name))
-        return "Verification successful! Your Discord nickname has been updated. You can safely close this window."
-    else:
-        return "Error: Failed to retrieve user identity from Roblox or Discord.", 400
+    return "Error: Could not link account.", 500
 
 @app.route('/privacy')
 def privacy():
