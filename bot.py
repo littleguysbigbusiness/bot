@@ -1,4 +1,24 @@
+from flask import Flask, request, redirect, session
+import requests
+import os
 import discord
+# ... (all your other existing imports here)
+
+# Initialize Flask immediately after imports
+app = Flask(__name__)
+
+# Define your routes while 'app' is fresh
+@app.route('/roblox_callback', methods=['GET'])
+def callback():
+    # ... (your full logic here, using 'request' from the import) ...
+    # ...
+    return "Verification successful!"
+
+@app.route('/privacy')
+def privacy():
+    return "Privacy Policy: We use your Roblox username to update your Discord nickname.", 200
+
+# Now the rest of your bot setup can follow below this import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import os
