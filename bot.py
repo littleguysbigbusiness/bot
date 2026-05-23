@@ -229,7 +229,8 @@ SHEET_NAME        = "Violations"
 STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276
 STATIC_STATUS_ID  = 1505808587807789117
-APPEAL_CHANNEL_ID = 1505891264032149574
+APPEAL_CHANNEL_ID  = 1505891264032149574
+TICKET_CATEGORY_ID = 1427602068620972083
 
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 
@@ -413,6 +414,8 @@ class WarningsBot(commands.Bot):
 
     async def setup_hook(self):
         self.add_view(AppealReviewButtons())
+        self.add_view(TicketOpenView())
+        self.add_view(TicketCloseButton())
         await self.tree.sync()
         print("✅ Slash commands synced globally.")
 
@@ -1282,6 +1285,305 @@ async def restoreroles(interaction: discord.Interaction):
             break
 
     await interaction.followup.send(f"✅ Restored **{restored}** staff roles cleanly.", ephemeral=True)
+
+
+# ── Ticket System ──────────────────────────────────────────────────────────────
+# Sheet: Tickets (A=ticket_id, B=discord_id, C=channel_id, D=status, E=created_at)
+# Sheet: TicketBans (A=discord_id, B=banned_by, C=reason, D=timestamp)
+
+TICKETS_SHEET          = "Tickets"
+TICKET_BANS_SHEET      = "TicketBans"
+TICKETS_READ_URL       = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E"
+TICKETS_APPEND_URL     = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+TICKET_BANS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:D"
+TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+
+def is_ticket_banned(user_id: int) -> tuple:
+    """Returns (True, reason) if banned, else (False, None)."""
+    try:
+        resp = requests.get(TICKET_BANS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for row in rows[1:]:  # skip header
+            if len(row) >= 1 and row[0].strip() == str(user_id):
+                reason = row[2].strip() if len(row) >= 3 else "No reason provided"
+                return True, reason
+    except Exception as e:
+        print(f"[TicketBans] Read error: {e}")
+    return False, None
+
+def ticket_log(ticket_id: str, discord_id: str, channel_id: str, status: str):
+    """Append a ticket record to the Tickets sheet."""
+    try:
+        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        requests.post(TICKETS_APPEND_URL, headers=sheets_headers(),
+                      json={"values": [[ticket_id, discord_id, channel_id, status, timestamp]]}, timeout=10)
+    except Exception as e:
+        print(f"[Tickets] Log error: {e}")
+
+def ticket_update_status(channel_id: str, new_status: str):
+    """Update the status of a ticket row by channel_id."""
+    try:
+        resp = requests.get(TICKETS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if len(row) >= 3 and row[2].strip() == str(channel_id):
+                sheet_row = i + 1
+                range_str = f"{TICKETS_SHEET}!D{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}?valueInputOption=RAW"
+                requests.put(url, headers=sheets_headers(), json={"values": [[new_status]]}, timeout=10)
+                return
+    except Exception as e:
+        print(f"[Tickets] Update status error: {e}")
+
+def get_open_tickets_for_user(discord_id: str) -> list:
+    """Return list of open ticket rows for a user."""
+    try:
+        resp = requests.get(TICKETS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        return [r for r in rows if len(r) >= 4 and r[1].strip() == str(discord_id) and r[3].strip() == "open"]
+    except Exception as e:
+        print(f"[Tickets] Read error: {e}")
+        return []
+
+async def create_ticket_channel(guild: discord.Guild, user: discord.Member, ticket_id: str) -> discord.TextChannel:
+    """Create a private ticket channel visible only to the user and admins."""
+    category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+
+    # Build permission overwrites
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            manage_channels=True,
+            read_message_history=True
+        )
+    }
+
+    # Give access to every role with admin/manage_guild/moderate_members
+    for role in guild.roles:
+        if role.permissions.administrator or role.permissions.manage_guild or role.permissions.moderate_members:
+            overwrites[role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+
+    channel = await guild.create_text_channel(
+        name=f"ticket-{user.name.lower().replace(' ', '-')}-{ticket_id[:4]}",
+        category=category,
+        overwrites=overwrites,
+        topic=f"Support ticket for {user} (ID: {user.id}) | Ticket ID: {ticket_id}"
+    )
+    return channel
+
+class TicketCloseButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close_btn")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (is_admin(interaction) or interaction.channel.topic and str(interaction.user.id) in interaction.channel.topic):
+            return await interaction.response.send_message("❌ You cannot close this ticket.", ephemeral=True)
+        await interaction.response.send_message("🔒 Closing ticket in 5 seconds...")
+        ticket_update_status(str(interaction.channel.id), "closed")
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
+        except Exception as e:
+            print(f"[Tickets] Channel delete error: {e}")
+
+class TicketOpenView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎫 Open a Ticket", style=discord.ButtonStyle.primary, custom_id="ticket_open_btn")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        user = interaction.user
+        guild = interaction.guild
+
+        # Check ticket ban
+        banned, ban_reason = is_ticket_banned(user.id)
+        if banned:
+            return await interaction.followup.send(
+                f"⛔ You are banned from creating tickets.\n**Reason:** {ban_reason}", ephemeral=True
+            )
+
+        # Check for existing open ticket
+        open_tickets = get_open_tickets_for_user(str(user.id))
+        if open_tickets:
+            chan_id = open_tickets[0][2].strip()
+            return await interaction.followup.send(
+                f"⚠️ You already have an open ticket: <#{chan_id}>. Please use that one.", ephemeral=True
+            )
+
+        ticket_id = str(uuid.uuid4())[:8].upper()
+        try:
+            channel = await create_ticket_channel(guild, user, ticket_id)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
+
+        ticket_log(ticket_id, str(user.id), str(channel.id), "open")
+
+        # Send welcome message in the ticket channel
+        welcome_embed = discord.Embed(
+            title=f"🎫 Ticket {ticket_id}",
+            description=f"Welcome {user.mention}! Support staff will be with you shortly.\n\nDescribe your issue below.",
+            color=discord.Color.from_rgb(44, 62, 80)
+        )
+        welcome_embed.add_field(name="Ticket ID", value=f"`{ticket_id}`", inline=True)
+        welcome_embed.add_field(name="Opened by", value=user.mention, inline=True)
+        welcome_embed.add_field(name="Opened at", value=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"), inline=True)
+        welcome_embed.set_footer(text="Use the button below to close this ticket when resolved.")
+        welcome_embed.timestamp = datetime.datetime.utcnow()
+
+        await channel.send(content=f"{user.mention}", embed=welcome_embed, view=TicketCloseButton())
+        await interaction.followup.send(f"✅ Your ticket has been opened: {channel.mention}", ephemeral=True)
+
+    @discord.ui.button(label="📋 View My Warnings", style=discord.ButtonStyle.secondary, custom_id="ticket_view_warnings_btn")
+    async def view_warnings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        warnings = get_user_warnings(str(interaction.user.id))
+        embed = build_historical_log_embed("📋 Your Warning History", warnings, interaction.user.display_avatar.url)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+# ── Ticket Slash Commands ──────────────────────────────────────────────────────
+@bot.tree.command(name="ticketpanel", description="[Admin] Post the ticket panel embed in this channel")
+async def ticketpanel(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+
+    embed = discord.Embed(
+        title="🎫 Support & Moderation Portal",
+        description=(
+            "Need help or want to check your moderation history?\n\n"
+            "🎫 **Open a Ticket** — Start a private support conversation with staff.\n"
+            "📋 **View My Warnings** — View your active and historical infractions privately."
+        ),
+        color=discord.Color.from_rgb(44, 62, 80)
+    )
+    embed.set_footer(text="Busways Administration • Tickets are private between you and staff.")
+    embed.timestamp = datetime.datetime.utcnow()
+
+    await interaction.channel.send(embed=embed, view=TicketOpenView())
+    await interaction.response.send_message("✅ Ticket panel posted.", ephemeral=True)
+
+@bot.tree.command(name="ticketban", description="[Admin] Ban a user from creating tickets")
+@app_commands.describe(user="The user to ban from tickets", reason="Reason for the ticket ban")
+async def ticketban(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    # Check if already banned
+    already_banned, _ = is_ticket_banned(user.id)
+    if already_banned:
+        return await interaction.followup.send(f"⚠️ {user.mention} is already ticket banned.", ephemeral=True)
+
+    try:
+        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        requests.post(TICKET_BANS_APPEND_URL, headers=sheets_headers(),
+                      json={"values": [[str(user.id), str(interaction.user), reason, timestamp]]}, timeout=10)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Failed to log ticket ban: {e}", ephemeral=True)
+
+    embed = discord.Embed(title="🚫 Ticket Ban Issued", color=discord.Color.red())
+    embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=True)
+    embed.add_field(name="Banned By", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Reason", value=f"```{reason}```", inline=False)
+    embed.timestamp = datetime.datetime.utcnow()
+    await interaction.followup.send(embed=embed)
+
+    try:
+        await user.send(embed=discord.Embed(
+            title="🚫 Ticket Ban",
+            description=f"You have been banned from creating tickets in **{interaction.guild.name}**.\n**Reason:** {reason}",
+            color=discord.Color.red()
+        ))
+    except Exception:
+        pass
+
+@bot.tree.command(name="ticketunban", description="[Admin] Remove a ticket ban from a user")
+@app_commands.describe(user="The user to unban from tickets")
+async def ticketunban(interaction: discord.Interaction, user: discord.Member):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        resp = requests.get(TICKET_BANS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if len(row) >= 1 and row[0].strip() == str(user.id):
+                sheet_row = i + 1
+                range_str = f"{TICKET_BANS_SHEET}!A{sheet_row}:D{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
+                requests.post(url, headers=sheets_headers(), timeout=10)
+                await interaction.followup.send(f"✅ Ticket ban removed for {user.mention}.")
+                return
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    await interaction.followup.send(f"⚠️ {user.mention} does not have an active ticket ban.", ephemeral=True)
+
+@bot.tree.command(name="ticketreply", description="Reply to a ticket from DMs or anywhere — choose your open ticket")
+@app_commands.describe(message="The message to send into the ticket")
+async def ticketreply(interaction: discord.Interaction, message: str):
+    await interaction.response.defer(ephemeral=True)
+
+    open_tickets = get_open_tickets_for_user(str(interaction.user.id))
+    if not open_tickets:
+        return await interaction.followup.send("❌ You have no open tickets.", ephemeral=True)
+
+    if len(open_tickets) == 1:
+        # Only one ticket — send directly
+        chan_id = int(open_tickets[0][2].strip())
+        channel = bot.get_channel(chan_id)
+        if not channel:
+            return await interaction.followup.send("❌ Ticket channel not found.", ephemeral=True)
+        embed = discord.Embed(description=message, color=discord.Color.from_rgb(44, 62, 80))
+        embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+        embed.timestamp = datetime.datetime.utcnow()
+        await channel.send(embed=embed)
+        await interaction.followup.send("✅ Message sent to your ticket.", ephemeral=True)
+    else:
+        # Multiple tickets — show dropdown
+        options = [
+            discord.SelectOption(
+                label=f"Ticket {r[0]} — #{bot.get_channel(int(r[2])).name if bot.get_channel(int(r[2])) else r[2]}",
+                value=r[2].strip()
+            )
+            for r in open_tickets if len(r) >= 3
+        ]
+
+        class TicketSelect(discord.ui.Select):
+            def __init__(self):
+                super().__init__(placeholder="Choose a ticket to reply to...", options=options)
+
+            async def callback(self, inner: discord.Interaction):
+                chan_id = int(self.values[0])
+                channel = bot.get_channel(chan_id)
+                if not channel:
+                    return await inner.response.send_message("❌ Channel not found.", ephemeral=True)
+                embed = discord.Embed(description=message, color=discord.Color.from_rgb(44, 62, 80))
+                embed.set_author(name=str(inner.user), icon_url=inner.user.display_avatar.url)
+                embed.timestamp = datetime.datetime.utcnow()
+                await channel.send(embed=embed)
+                await inner.response.send_message("✅ Message sent.", ephemeral=True)
+
+        class TicketSelectView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+                self.add_item(TicketSelect())
+
+        await interaction.followup.send("Select which ticket to reply to:", view=TicketSelectView(), ephemeral=True)
 
 # ── Bot Runner ─────────────────────────────────────────────────────────────────
 def run_discord_bot():
