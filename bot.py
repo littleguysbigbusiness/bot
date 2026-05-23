@@ -1345,24 +1345,23 @@ def get_open_tickets_for_user(discord_id: str) -> list:
         print(f"[Tickets] Read error: {e}")
         return []
 
-async def create_ticket_thread(panel_message: discord.Message, user: discord.Member, ticket_id: str) -> discord.Thread:
+async def create_ticket_thread(channel: discord.TextChannel, user: discord.Member, ticket_id: str) -> discord.Thread:
     """Create a private thread in the ticket panel channel.
     Private threads are only visible to added members and those with Manage Threads.
-    Falls back to a public thread if private threads are unavailable.
+    Falls back to a public thread on the channel if private threads are unavailable.
     """
-    channel = panel_message.channel
-
     try:
-        # Private thread — preferred
+        # Private thread — preferred, created directly on the channel (not a message)
         thread = await channel.create_thread(
             name=f"ticket-{user.name}-{ticket_id[:4]}",
             auto_archive_duration=10080,
             type=discord.ChannelType.private_thread,
+            invitable=False,
             reason=f"Support ticket {ticket_id} for {user}"
         )
     except (discord.HTTPException, discord.Forbidden):
-        # Fallback: public thread on the panel message
-        thread = await panel_message.create_thread(
+        # Fallback: public thread — no type argument needed
+        thread = await channel.create_thread(
             name=f"ticket-{user.name}-{ticket_id[:4]}",
             auto_archive_duration=10080,
             reason=f"Support ticket {ticket_id} for {user}"
@@ -1428,7 +1427,7 @@ class TicketOpenView(discord.ui.View):
 
         ticket_id = str(uuid.uuid4())[:8].upper()
         try:
-            thread = await create_ticket_thread(interaction.message, user, ticket_id)
+            thread = await create_ticket_thread(interaction.channel, user, ticket_id)
         except Exception as e:
             return await interaction.followup.send(f"❌ Failed to create ticket thread: {e}", ephemeral=True)
 
