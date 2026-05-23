@@ -230,7 +230,7 @@ STATUS_PAGE_URL   = "https://bwr7s.statuspage.io/api/v2/summary.json"
 STATUS_CHANNEL_ID = 1476812926521184276
 STATIC_STATUS_ID  = 1505808587807789117
 APPEAL_CHANNEL_ID  = 1505891264032149574
-TICKET_CATEGORY_ID = 1427602068620972083
+TICKET_PANEL_CHANNEL_ID = 1427602068620972083  # Channel where /ticketpanel is posted
 
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 
@@ -1345,43 +1345,19 @@ def get_open_tickets_for_user(discord_id: str) -> list:
         print(f"[Tickets] Read error: {e}")
         return []
 
-async def create_ticket_channel(guild: discord.Guild, user: discord.Member, ticket_id: str) -> discord.TextChannel:
-    """Create a private ticket channel visible only to the user and admins."""
-    category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
-
-    # Build permission overwrites
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-            attach_files=True
-        ),
-        guild.me: discord.PermissionOverwrite(
-            view_channel=True,
-            send_messages=True,
-            manage_channels=True,
-            read_message_history=True
-        )
-    }
-
-    # Give access to every role with admin/manage_guild/moderate_members
-    for role in guild.roles:
-        if role.permissions.administrator or role.permissions.manage_guild or role.permissions.moderate_members:
-            overwrites[role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-
-    channel = await guild.create_text_channel(
-        name=f"ticket-{user.name.lower().replace(' ', '-')}-{ticket_id[:4]}",
-        category=category,
-        overwrites=overwrites,
-        topic=f"Support ticket for {user} (ID: {user.id}) | Ticket ID: {ticket_id}"
+async def create_ticket_thread(panel_message: discord.Message, user: discord.Member, ticket_id: str) -> discord.Thread:
+    """Create a private ticket thread under the ticket panel message.
+    Uses a private thread so only the user and admins with manage_threads can see it.
+    """
+    thread = await panel_message.create_thread(
+        name=f"ticket-{user.name}-{ticket_id[:4]}",
+        auto_archive_duration=10080,  # 7 days
+        type=discord.ChannelType.private_thread,
+        reason=f"Support ticket {ticket_id} for {user}"
     )
-    return channel
+    # Add the user explicitly (private threads require this)
+    await thread.add_user(user)
+    return thread
 
 class TicketCloseButton(discord.ui.View):
     def __init__(self):
@@ -1389,15 +1365,24 @@ class TicketCloseButton(discord.ui.View):
 
     @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close_btn")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not (is_admin(interaction) or interaction.channel.topic and str(interaction.user.id) in interaction.channel.topic):
+        # Allow closer if admin OR if the thread name contains their id stored in sheet
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread):
+            return await interaction.response.send_message("❌ This is not a ticket thread.", ephemeral=True)
+
+        open_tickets = get_open_tickets_for_user(str(interaction.user.id))
+        user_owns = any(t[2].strip() == str(thread.id) for t in open_tickets)
+
+        if not is_admin(interaction) and not user_owns:
             return await interaction.response.send_message("❌ You cannot close this ticket.", ephemeral=True)
+
         await interaction.response.send_message("🔒 Closing ticket in 5 seconds...")
-        ticket_update_status(str(interaction.channel.id), "closed")
+        ticket_update_status(str(thread.id), "closed")
         await asyncio.sleep(5)
         try:
-            await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
+            await thread.edit(archived=True, locked=True, reason=f"Ticket closed by {interaction.user}")
         except Exception as e:
-            print(f"[Tickets] Channel delete error: {e}")
+            print(f"[Tickets] Thread close error: {e}")
 
 class TicketOpenView(discord.ui.View):
     def __init__(self):
@@ -1419,20 +1404,20 @@ class TicketOpenView(discord.ui.View):
         # Check for existing open ticket
         open_tickets = get_open_tickets_for_user(str(user.id))
         if open_tickets:
-            chan_id = open_tickets[0][2].strip()
+            thread_id = open_tickets[0][2].strip()
             return await interaction.followup.send(
-                f"⚠️ You already have an open ticket: <#{chan_id}>. Please use that one.", ephemeral=True
+                f"⚠️ You already have an open ticket: <#{thread_id}>. Please use that one.", ephemeral=True
             )
 
         ticket_id = str(uuid.uuid4())[:8].upper()
         try:
-            channel = await create_ticket_channel(guild, user, ticket_id)
+            thread = await create_ticket_thread(interaction.message, user, ticket_id)
         except Exception as e:
-            return await interaction.followup.send(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
+            return await interaction.followup.send(f"❌ Failed to create ticket thread: {e}", ephemeral=True)
 
-        ticket_log(ticket_id, str(user.id), str(channel.id), "open")
+        ticket_log(ticket_id, str(user.id), str(thread.id), "open")
 
-        # Send welcome message in the ticket channel
+        # Send welcome message inside the thread
         welcome_embed = discord.Embed(
             title=f"🎫 Ticket {ticket_id}",
             description=f"Welcome {user.mention}! Support staff will be with you shortly.\n\nDescribe your issue below.",
@@ -1444,8 +1429,8 @@ class TicketOpenView(discord.ui.View):
         welcome_embed.set_footer(text="Use the button below to close this ticket when resolved.")
         welcome_embed.timestamp = datetime.datetime.utcnow()
 
-        await channel.send(content=f"{user.mention}", embed=welcome_embed, view=TicketCloseButton())
-        await interaction.followup.send(f"✅ Your ticket has been opened: {channel.mention}", ephemeral=True)
+        await thread.send(content=f"{user.mention}", embed=welcome_embed, view=TicketCloseButton())
+        await interaction.followup.send(f"✅ Your ticket thread has been created: {thread.mention}", ephemeral=True)
 
     @discord.ui.button(label="📋 View My Warnings", style=discord.ButtonStyle.secondary, custom_id="ticket_view_warnings_btn")
     async def view_warnings(self, interaction: discord.Interaction, button: discord.ui.Button):
