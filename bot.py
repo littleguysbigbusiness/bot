@@ -126,11 +126,7 @@ def is_already_verified(user_id: int) -> bool:
 # ── Flask Routes ───────────────────────────────────────────────────────────────
 @app.route('/')
 def home():
-    return """
-    <h1>Busways Verification</h1>
-    <p>Welcome to the official verification portal.</p>
-    <p>Please use the /verify command in our Discord server to begin.</p>
-    """
+    return "BWR7 Warnings Bot is Online Framework Stable!", 200
 
 @app.route('/callback', methods=['GET'])
 def callback():
@@ -1299,17 +1295,28 @@ TICKETS_SHEET          = "Tickets"
 TICKET_BANS_SHEET      = "TicketBans"
 TICKETS_READ_URL       = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E"
 TICKETS_APPEND_URL     = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
-TICKET_BANS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:D"
-TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+TICKET_BANS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:E"
+TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 def is_ticket_banned(user_id: int) -> tuple:
-    """Returns (True, reason) if banned, else (False, None)."""
+    """Returns (True, reason) if banned and not expired, else (False, None).
+    Sheet columns: A=discord_id, B=banned_by, C=reason, D=timestamp, E=end_date (or 'Permanent')
+    """
     try:
         resp = requests.get(TICKET_BANS_READ_URL, headers=sheets_headers(), timeout=10)
         rows = resp.json().get("values", [])
-        for row in rows[1:]:  # skip header
+        for row in rows:
             if len(row) >= 1 and row[0].strip() == str(user_id):
-                reason = row[2].strip() if len(row) >= 3 else "No reason provided"
+                reason   = row[2].strip() if len(row) >= 3 else "No reason provided"
+                end_date = row[4].strip() if len(row) >= 5 else "Permanent"
+                # Check if ban has expired
+                if end_date and end_date != "Permanent":
+                    try:
+                        expiry = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+                        if datetime.datetime.utcnow() > expiry:
+                            return False, None  # Ban expired
+                    except ValueError:
+                        pass
                 return True, reason
     except Exception as e:
         print(f"[TicketBans] Read error: {e}")
@@ -1481,27 +1488,48 @@ async def ticketpanel(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Ticket panel posted.", ephemeral=True)
 
 @bot.tree.command(name="ticketban", description="[Admin] Ban a user from creating tickets")
-@app_commands.describe(user="The user to ban from tickets", reason="Reason for the ticket ban")
-async def ticketban(interaction: discord.Interaction, user: discord.Member, reason: str):
+@app_commands.describe(
+    user="The user to ban from tickets",
+    reason="Reason for the ticket ban",
+    end_date="Optional expiry date (YYYY-MM-DD). Leave blank for permanent."
+)
+async def ticketban(interaction: discord.Interaction, user: discord.Member, reason: str, end_date: str = None):
     if not is_admin(interaction):
         return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
+
+    # Validate end_date format if provided
+    if end_date:
+        try:
+            datetime.datetime.strptime(end_date.strip(), "%Y-%m-%d")
+        except ValueError:
+            return await interaction.followup.send("❌ Invalid date format. Use `YYYY-MM-DD`.", ephemeral=True)
 
     # Check if already banned
     already_banned, _ = is_ticket_banned(user.id)
     if already_banned:
         return await interaction.followup.send(f"⚠️ {user.mention} is already ticket banned.", ephemeral=True)
 
+    final_end_date = end_date.strip() if end_date else "Permanent"
+    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
     try:
-        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        requests.post(TICKET_BANS_APPEND_URL, headers=sheets_headers(),
-                      json={"values": [[str(user.id), str(interaction.user), reason, timestamp]]}, timeout=10)
+        resp = requests.post(
+            TICKET_BANS_APPEND_URL,
+            headers=sheets_headers(),
+            json={"values": [[str(user.id), str(interaction.user), reason, timestamp, final_end_date]]},
+            timeout=10
+        )
+        if resp.status_code not in (200, 201):
+            print(f"[TicketBans] Append returned {resp.status_code}: {resp.text}")
+            return await interaction.followup.send(f"❌ Sheet returned error {resp.status_code}. Check bot logs.", ephemeral=True)
     except Exception as e:
         return await interaction.followup.send(f"❌ Failed to log ticket ban: {e}", ephemeral=True)
 
     embed = discord.Embed(title="🚫 Ticket Ban Issued", color=discord.Color.red())
     embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=True)
     embed.add_field(name="Banned By", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Expires", value=final_end_date, inline=True)
     embed.add_field(name="Reason", value=f"```{reason}```", inline=False)
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
@@ -1509,7 +1537,7 @@ async def ticketban(interaction: discord.Interaction, user: discord.Member, reas
     try:
         await user.send(embed=discord.Embed(
             title="🚫 Ticket Ban",
-            description=f"You have been banned from creating tickets in **{interaction.guild.name}**.\n**Reason:** {reason}",
+            description=f"You have been banned from creating tickets in **{interaction.guild.name}**.\n**Reason:** {reason}\n**Expires:** {final_end_date}",
             color=discord.Color.red()
         ))
     except Exception:
