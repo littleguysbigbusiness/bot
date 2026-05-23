@@ -126,7 +126,11 @@ def is_already_verified(user_id: int) -> bool:
 # ── Flask Routes ───────────────────────────────────────────────────────────────
 @app.route('/')
 def home():
-    return "BWR7 Warnings Bot is Online Framework Stable!", 200
+    return """
+    <h1>Busways Verification</h1>
+    <p>Welcome to the official verification portal.</p>
+    <p>Please use the /verify command in our Discord server to begin.</p>
+    """
 
 @app.route('/callback', methods=['GET'])
 def callback():
