@@ -1346,17 +1346,34 @@ def get_open_tickets_for_user(discord_id: str) -> list:
         return []
 
 async def create_ticket_thread(panel_message: discord.Message, user: discord.Member, ticket_id: str) -> discord.Thread:
-    """Create a private ticket thread under the ticket panel message.
-    Uses a private thread so only the user and admins with manage_threads can see it.
+    """Create a private thread in the ticket panel channel.
+    Private threads are only visible to added members and those with Manage Threads.
+    Falls back to a public thread if private threads are unavailable.
     """
-    thread = await panel_message.create_thread(
-        name=f"ticket-{user.name}-{ticket_id[:4]}",
-        auto_archive_duration=10080,  # 7 days
-        type=discord.ChannelType.private_thread,
-        reason=f"Support ticket {ticket_id} for {user}"
-    )
-    # Add the user explicitly (private threads require this)
-    await thread.add_user(user)
+    channel = panel_message.channel
+
+    try:
+        # Private thread — preferred
+        thread = await channel.create_thread(
+            name=f"ticket-{user.name}-{ticket_id[:4]}",
+            auto_archive_duration=10080,
+            type=discord.ChannelType.private_thread,
+            reason=f"Support ticket {ticket_id} for {user}"
+        )
+    except (discord.HTTPException, discord.Forbidden):
+        # Fallback: public thread on the panel message
+        thread = await panel_message.create_thread(
+            name=f"ticket-{user.name}-{ticket_id[:4]}",
+            auto_archive_duration=10080,
+            reason=f"Support ticket {ticket_id} for {user}"
+        )
+
+    # Add the user (required for private threads, harmless for public)
+    try:
+        await thread.add_user(user)
+    except Exception:
+        pass
+
     return thread
 
 class TicketCloseButton(discord.ui.View):
