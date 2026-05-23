@@ -1300,26 +1300,56 @@ TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREAD
 
 def is_ticket_banned(user_id: int) -> tuple:
     """Returns (True, reason) if banned and not expired, else (False, None).
-    Sheet columns: A=discord_id, B=banned_by, C=reason, D=timestamp, E=end_date (or 'Permanent')
+    Checks TicketBans sheet first, then falls back to Violations sheet for 'Ticket Ban' entries.
     """
+    uid_str = str(user_id)
+
+    # ── Primary: TicketBans sheet ──────────────────────────────────────────────
     try:
         resp = requests.get(TICKET_BANS_READ_URL, headers=sheets_headers(), timeout=10)
+        print(f"[TicketBans] Read status: {resp.status_code}")
         rows = resp.json().get("values", [])
+        print(f"[TicketBans] Rows found: {len(rows)} — looking for user {uid_str}")
         for row in rows:
-            if len(row) >= 1 and row[0].strip() == str(user_id):
+            print(f"[TicketBans] Row: {row}")
+            if len(row) >= 1 and row[0].strip() == uid_str:
                 reason   = row[2].strip() if len(row) >= 3 else "No reason provided"
                 end_date = row[4].strip() if len(row) >= 5 else "Permanent"
-                # Check if ban has expired
-                if end_date and end_date != "Permanent":
+                if end_date and end_date not in ("Permanent", ""):
                     try:
                         expiry = datetime.datetime.strptime(end_date, "%Y-%m-%d")
                         if datetime.datetime.utcnow() > expiry:
-                            return False, None  # Ban expired
+                            print(f"[TicketBans] Ban expired for {uid_str}")
+                            return False, None
                     except ValueError:
                         pass
+                print(f"[TicketBans] ✅ Ban found for {uid_str}: {reason}")
                 return True, reason
     except Exception as e:
         print(f"[TicketBans] Read error: {e}")
+
+    # ── Fallback: Violations sheet — look for active Ticket Ban rows ───────────
+    try:
+        for row in read_all_rows():
+            row = pad(row)
+            if (row[COL_USER_ID].strip() == uid_str
+                    and row[COL_RESTRICTION].strip() == "Ticket Ban"
+                    and row[COL_REVOKED].strip().upper() != "TRUE"):
+                end_date = row[COL_END_DATE].strip()
+                if end_date and end_date not in ("Never", "Permanent", ""):
+                    try:
+                        expiry = datetime.datetime.strptime(end_date.split(" ")[0], "%Y-%m-%d")
+                        if datetime.datetime.utcnow() > expiry:
+                            print(f"[TicketBans] Violations fallback: ban expired for {uid_str}")
+                            return False, None
+                    except ValueError:
+                        pass
+                reason = row[COL_REASON].strip()
+                print(f"[TicketBans] ✅ Ban found via Violations fallback for {uid_str}: {reason}")
+                return True, reason
+    except Exception as e:
+        print(f"[TicketBans] Violations fallback error: {e}")
+
     return False, None
 
 def ticket_log(ticket_id: str, discord_id: str, channel_id: str, status: str):
