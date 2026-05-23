@@ -1296,7 +1296,7 @@ TICKET_BANS_SHEET      = "TicketBans"
 TICKETS_READ_URL       = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E"
 TICKETS_APPEND_URL     = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 TICKET_BANS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:E"
-TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 def is_ticket_banned(user_id: int) -> tuple:
     """Returns (True, reason) if banned and not expired, else (False, None).
@@ -1513,6 +1513,9 @@ async def ticketban(interaction: discord.Interaction, user: discord.Member, reas
     final_end_date = end_date.strip() if end_date else "Permanent"
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    warning_id = str(uuid.uuid4())[:8].upper()
+
+    # 1. Log to TicketBans sheet for fast lookup
     try:
         resp = requests.post(
             TICKET_BANS_APPEND_URL,
@@ -1522,14 +1525,22 @@ async def ticketban(interaction: discord.Interaction, user: discord.Member, reas
         )
         if resp.status_code not in (200, 201):
             print(f"[TicketBans] Append returned {resp.status_code}: {resp.text}")
-            return await interaction.followup.send(f"❌ Sheet returned error {resp.status_code}. Check bot logs.", ephemeral=True)
     except Exception as e:
-        return await interaction.followup.send(f"❌ Failed to log ticket ban: {e}", ephemeral=True)
+        print(f"[TicketBans] Append error: {e}")
+
+    # 2. Also log to Violations sheet so it appears in moderation history
+    start_date = timestamp[:10]
+    append_row([
+        str(user.id), str(user), str(interaction.user), str(interaction.user.id),
+        reason, timestamp, warning_id, "FALSE", "", "", "Discord", "Ticket Ban",
+        start_date, final_end_date, warning_id
+    ])
 
     embed = discord.Embed(title="🚫 Ticket Ban Issued", color=discord.Color.red())
     embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=True)
     embed.add_field(name="Banned By", value=interaction.user.mention, inline=True)
     embed.add_field(name="Expires", value=final_end_date, inline=True)
+    embed.add_field(name="Case ID", value=f"`{warning_id}`", inline=True)
     embed.add_field(name="Reason", value=f"```{reason}```", inline=False)
     embed.timestamp = datetime.datetime.utcnow()
     await interaction.followup.send(embed=embed)
@@ -1537,7 +1548,7 @@ async def ticketban(interaction: discord.Interaction, user: discord.Member, reas
     try:
         await user.send(embed=discord.Embed(
             title="🚫 Ticket Ban",
-            description=f"You have been banned from creating tickets in **{interaction.guild.name}**.\n**Reason:** {reason}\n**Expires:** {final_end_date}",
+            description=f"You have been banned from creating tickets in **{interaction.guild.name}**.\n**Reason:** {reason}\n**Expires:** {final_end_date}\n**Case ID:** `{warning_id}`",
             color=discord.Color.red()
         ))
     except Exception:
