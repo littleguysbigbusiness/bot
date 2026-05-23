@@ -1292,63 +1292,38 @@ async def restoreroles(interaction: discord.Interaction):
 # Sheet: TicketBans (A=discord_id, B=banned_by, C=reason, D=timestamp)
 
 TICKETS_SHEET          = "Tickets"
-TICKET_BANS_SHEET      = "TicketBans"
 TICKETS_READ_URL       = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E"
 TICKETS_APPEND_URL     = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
-TICKET_BANS_READ_URL   = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A:E"
-TICKET_BANS_APPEND_URL = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKET_BANS_SHEET}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 
 def is_ticket_banned(user_id: int) -> tuple:
-    """Returns (True, reason) if banned and not expired, else (False, None).
-    Checks TicketBans sheet first, then falls back to Violations sheet for 'Ticket Ban' entries.
+    """Returns (True, reason) if user has active Ticket Ban in Violations sheet, else (False, None).
+    Checks for non-revoked Ticket Ban rows with end_date in future (or Permanent).
     """
     uid_str = str(user_id)
-
-    # ── Primary: TicketBans sheet ──────────────────────────────────────────────
-    try:
-        resp = requests.get(TICKET_BANS_READ_URL, headers=sheets_headers(), timeout=10)
-        print(f"[TicketBans] Read status: {resp.status_code}")
-        rows = resp.json().get("values", [])
-        print(f"[TicketBans] Rows found: {len(rows)} — looking for user {uid_str}")
-        for row in rows:
-            print(f"[TicketBans] Row: {row}")
-            if len(row) >= 1 and row[0].strip() == uid_str:
-                reason   = row[2].strip() if len(row) >= 3 else "No reason provided"
-                end_date = row[4].strip() if len(row) >= 5 else "Permanent"
-                if end_date and end_date not in ("Permanent", ""):
-                    try:
-                        expiry = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-                        if datetime.datetime.utcnow() > expiry:
-                            print(f"[TicketBans] Ban expired for {uid_str}")
-                            return False, None
-                    except ValueError:
-                        pass
-                print(f"[TicketBans] ✅ Ban found for {uid_str}: {reason}")
-                return True, reason
-    except Exception as e:
-        print(f"[TicketBans] Read error: {e}")
-
-    # ── Fallback: Violations sheet — look for active Ticket Ban rows ───────────
     try:
         for row in read_all_rows():
             row = pad(row)
             if (row[COL_USER_ID].strip() == uid_str
                     and row[COL_RESTRICTION].strip() == "Ticket Ban"
                     and row[COL_REVOKED].strip().upper() != "TRUE"):
-                end_date = row[COL_END_DATE].strip()
-                if end_date and end_date not in ("Never", "Permanent", ""):
+                end_date_str = row[COL_END_DATE].strip()
+                reason = row[COL_REASON].strip()
+
+                # Check expiry
+                if end_date_str and end_date_str not in ("Never", "Permanent", ""):
                     try:
-                        expiry = datetime.datetime.strptime(end_date.split(" ")[0], "%Y-%m-%d")
+                        # Handle timestamps like "2026-05-23 12:34:56 UTC" or just dates
+                        clean_date = end_date_str.split(" ")[0].strip()
+                        expiry = datetime.datetime.strptime(clean_date, "%Y-%m-%d")
                         if datetime.datetime.utcnow() > expiry:
-                            print(f"[TicketBans] Violations fallback: ban expired for {uid_str}")
-                            return False, None
+                            continue  # Ban expired, skip this row
                     except ValueError:
                         pass
-                reason = row[COL_REASON].strip()
-                print(f"[TicketBans] ✅ Ban found via Violations fallback for {uid_str}: {reason}")
+
+                # Found active ban
                 return True, reason
     except Exception as e:
-        print(f"[TicketBans] Violations fallback error: {e}")
+        print(f"[TicketBan] Check error: {e}")
 
     return False, None
 
@@ -1545,20 +1520,7 @@ async def ticketban(interaction: discord.Interaction, user: discord.Member, reas
 
     warning_id = str(uuid.uuid4())[:8].upper()
 
-    # 1. Log to TicketBans sheet for fast lookup
-    try:
-        resp = requests.post(
-            TICKET_BANS_APPEND_URL,
-            headers=sheets_headers(),
-            json={"values": [[str(user.id), str(interaction.user), reason, timestamp, final_end_date]]},
-            timeout=10
-        )
-        if resp.status_code not in (200, 201):
-            print(f"[TicketBans] Append returned {resp.status_code}: {resp.text}")
-    except Exception as e:
-        print(f"[TicketBans] Append error: {e}")
-
-    # 2. Also log to Violations sheet so it appears in moderation history
+    # Log to Violations sheet
     start_date = timestamp[:10]
     append_row([
         str(user.id), str(user), str(interaction.user), str(interaction.user.id),
