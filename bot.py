@@ -329,6 +329,103 @@ GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
 # when posting violations to /api/roblox/violation. Set this on Render.
 ROBLOX_INGEST_SECRET = os.environ.get("ROBLOX_INGEST_SECRET", "")
 
+# ── Roblox Group Management (Open Cloud) ────────────────────────────────────
+# GROUP_KEY: Open Cloud API key scoped to group:read + group:manage for your
+#            specific group only. Set as an env var on Render — never hardcode.
+# GROUP_ID:  Numeric Roblox group ID to manage. Set as an env var on Render.
+GROUP_KEY = os.environ.get("GROUP_KEY", "")
+GROUP_ID  = os.environ.get("GROUP_ID", "")
+OPEN_CLOUD_BASE = "https://apis.roblox.com/cloud/v2"
+
+def _open_cloud_headers():
+    return {"x-api-key": GROUP_KEY, "Content-Type": "application/json"}
+
+def group_get_roles():
+    """Return list of {id, rank, displayName} for every role in the configured group."""
+    if not GROUP_KEY or not GROUP_ID:
+        raise RuntimeError("GROUP_KEY or GROUP_ID not configured on the server.")
+    roles = []
+    page_token = None
+    while True:
+        url = f"{OPEN_CLOUD_BASE}/groups/{GROUP_ID}/roles"
+        params = {"maxPageSize": 20}
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(url, headers=_open_cloud_headers(), params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        for r in data.get("groupRoles", []):
+            role_id = r.get("id") or r.get("name", "").split("/")[-1]
+            roles.append({
+                "id": str(role_id),
+                "rank": r.get("rank"),
+                "displayName": r.get("displayName", "Unknown")
+            })
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return roles
+
+def group_find_role(query: str):
+    """Find a role by exact name, prefix match, numeric rank, or role ID."""
+    roles = group_get_roles()
+    query_lower = query.strip().lower()
+
+    # numeric rank match
+    if query.strip().isdigit():
+        for r in roles:
+            if str(r["rank"]) == query.strip():
+                return r
+        for r in roles:
+            if r["id"] == query.strip():
+                return r
+
+    # exact name match
+    for r in roles:
+        if r["displayName"].lower() == query_lower:
+            return r
+
+    # prefix match
+    for r in roles:
+        if r["displayName"].lower().startswith(query_lower):
+            return r
+
+    return None
+
+def group_get_membership(roblox_user_id: str):
+    """Get a user's current role in the group, or None if not a member."""
+    url = f"{OPEN_CLOUD_BASE}/groups/{GROUP_ID}/memberships"
+    params = {"filter": f"user == 'users/{roblox_user_id}'"}
+    resp = requests.get(url, headers=_open_cloud_headers(), params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    memberships = data.get("groupMemberships", [])
+    return memberships[0] if memberships else None
+
+def group_set_rank(roblox_user_id: str, role_id: str):
+    """Set a user's role in the group via Open Cloud. Raises on failure."""
+    membership = group_get_membership(roblox_user_id)
+    if not membership:
+        raise ValueError("User is not a member of this group.")
+
+    membership_path = membership.get("path")  # e.g. groups/123/memberships/456
+    url = f"{OPEN_CLOUD_BASE}/{membership_path}"
+    body = {"role": f"groups/{GROUP_ID}/roles/{role_id}"}
+    resp = requests.patch(url, headers=_open_cloud_headers(), json=body, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+def group_kick_member(roblox_user_id: str):
+    """Remove a user from the group via Open Cloud. Raises on failure."""
+    membership = group_get_membership(roblox_user_id)
+    if not membership:
+        raise ValueError("User is not a member of this group.")
+    membership_path = membership.get("path")
+    url = f"{OPEN_CLOUD_BASE}/{membership_path}"
+    resp = requests.delete(url, headers=_open_cloud_headers(), timeout=10)
+    resp.raise_for_status()
+    return True
+
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
 SHEET_UPDATE_BASE = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
@@ -1089,6 +1186,115 @@ async def setprefix(interaction: discord.Interaction, prefix: str):
         await interaction.followup.send("❌ I don't have permission to change your nickname.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to update nickname: {e}", ephemeral=True)
+
+def roblox_username_to_id(username: str):
+    """Resolve a Roblox username to a user ID via the public users API."""
+    resp = requests.post(
+        "https://users.roblox.com/v1/usernames/users",
+        json={"usernames": [username], "excludeBannedUsers": False},
+        timeout=10
+    )
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    if not data:
+        return None
+    return str(data[0]["id"])
+
+@bot.tree.command(name="grouproles", description="[Admin] List all roles in the configured Roblox group")
+async def grouproles(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    if not GROUP_KEY or not GROUP_ID:
+        return await interaction.followup.send("❌ GROUP_KEY or GROUP_ID is not configured on the server.", ephemeral=True)
+
+    try:
+        roles = group_get_roles()
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Could not fetch roles: {e}", ephemeral=True)
+
+    roles.sort(key=lambda r: r["rank"] if r["rank"] is not None else 0)
+    lines = [f"`{r['rank']:>3}` — **{r['displayName']}** (Role ID: `{r['id']}`)" for r in roles]
+
+    embed = discord.Embed(
+        title="📋 Group Roles",
+        description="\n".join(lines) if lines else "No roles found.",
+        color=discord.Color.from_rgb(44, 62, 80)
+    )
+    embed.timestamp = datetime.datetime.utcnow()
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="grouprank", description="[Admin] Set a user's rank in the Roblox group")
+@app_commands.describe(
+    roblox_username="The Roblox username of the target",
+    rank="Role name, numeric rank, or role ID (see /grouproles)"
+)
+async def grouprank(interaction: discord.Interaction, roblox_username: str, rank: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer()
+
+    if not GROUP_KEY or not GROUP_ID:
+        return await interaction.followup.send("❌ GROUP_KEY or GROUP_ID is not configured on the server.")
+
+    try:
+        target_id = roblox_username_to_id(roblox_username)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Failed to look up Roblox username: {e}")
+    if not target_id:
+        return await interaction.followup.send(f"❌ Roblox user `{roblox_username}` not found.")
+
+    try:
+        role = group_find_role(rank)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Failed to fetch group roles: {e}")
+    if not role:
+        return await interaction.followup.send(f"❌ No role matching `{rank}` found. Use `/grouproles` to see options.")
+
+    try:
+        group_set_rank(target_id, role["id"])
+    except ValueError as e:
+        return await interaction.followup.send(f"❌ {e}")
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Rank change failed: {e}")
+
+    embed = discord.Embed(title="✅ Group Rank Updated", color=discord.Color.from_rgb(39, 174, 96))
+    embed.add_field(name="Target", value=f"{roblox_username} (`{target_id}`)", inline=True)
+    embed.add_field(name="New Role", value=f"{role['displayName']} (Rank {role['rank']})", inline=True)
+    embed.add_field(name="Changed By", value=interaction.user.mention, inline=True)
+    embed.timestamp = datetime.datetime.utcnow()
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="groupkick", description="[Admin] Remove a user from the Roblox group")
+@app_commands.describe(roblox_username="The Roblox username of the target")
+async def groupkick(interaction: discord.Interaction, roblox_username: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+    await interaction.response.defer()
+
+    if not GROUP_KEY or not GROUP_ID:
+        return await interaction.followup.send("❌ GROUP_KEY or GROUP_ID is not configured on the server.")
+
+    try:
+        target_id = roblox_username_to_id(roblox_username)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Failed to look up Roblox username: {e}")
+    if not target_id:
+        return await interaction.followup.send(f"❌ Roblox user `{roblox_username}` not found.")
+
+    try:
+        group_kick_member(target_id)
+    except ValueError as e:
+        return await interaction.followup.send(f"❌ {e}")
+    except Exception as e:
+        return await interaction.followup.send(f"❌ Group kick failed: {e}")
+
+    embed = discord.Embed(title="✅ Removed From Group", color=discord.Color.from_rgb(230, 126, 34))
+    embed.add_field(name="Target", value=f"{roblox_username} (`{target_id}`)", inline=True)
+    embed.add_field(name="Removed By", value=interaction.user.mention, inline=True)
+    embed.timestamp = datetime.datetime.utcnow()
+    await interaction.followup.send(embed=embed)
 
 def parse_embed_json(embed_json: str):
     """Parse a JSON string into a discord.Embed. Raises on failure."""
