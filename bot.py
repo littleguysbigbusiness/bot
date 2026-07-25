@@ -1996,11 +1996,15 @@ async def ticketreply(interaction: discord.Interaction, message: str):
 # ── Bot Runner ─────────────────────────────────────────────────────────────────
 def run_discord_bot():
     if not DISCORD_TOKEN:
+        print("❌ DISCORD_BOT_TOKEN is not set (empty or missing env var) — bot thread will not start.")
         return
+    print("🔑 DISCORD_BOT_TOKEN found — starting Discord bot thread...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(bot.start(DISCORD_TOKEN))
+    except discord.errors.LoginFailure as e:
+        print(f"❌ Discord login failed — the token is invalid/expired/regenerated: {e}")
     except Exception as e:
         print(f"❌ Discord bot loop crashed: {e}")
     finally:
@@ -2019,3 +2023,4 @@ else:
     print("🛰️ Direct script execution detected. Initializing Flask development engine...")
     threading.Thread(target=run_discord_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    
