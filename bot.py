@@ -11,7 +11,7 @@ import re
 import asyncio
 import secrets
 import urllib.parse
-from flask import Flask, request, redirect, session
+from flask import Flask, request, redirect, session, jsonify
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
@@ -222,6 +222,47 @@ def privacy():
 def terms():
     return "Terms of Service: By verifying your account, you consent to the bot updating your Discord server nickname to match your Roblox username.", 200
 
+@app.route('/api/roblox/violation', methods=['POST'])
+def api_roblox_violation():
+    """Ingest endpoint for the Roblox in-game moderation panel.
+    Expects JSON: userId, username, issuedBy, reason, restriction,
+    optional startDate, endDate, incidentId.
+    Requires header X-Auth-Token to match ROBLOX_INGEST_SECRET if set.
+    """
+    if ROBLOX_INGEST_SECRET:
+        if request.headers.get("X-Auth-Token", "") != ROBLOX_INGEST_SECRET:
+            return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(force=True, silent=True) or {}
+
+    required = ["userId", "username", "issuedBy", "reason", "restriction"]
+    missing = [f for f in required if not str(data.get(f, "")).strip()]
+    if missing:
+        return jsonify({"error": f"Missing fields: {missing}"}), 400
+
+    warning_id = str(data.get("incidentId") or uuid.uuid4()).strip()[:8].upper()
+    timestamp  = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    start_date = str(data.get("startDate") or timestamp[:10]).strip()
+    end_date   = str(data.get("endDate") or "Never").strip() or "Never"
+    reason      = str(data.get("reason")).strip()
+    restriction = str(data.get("restriction")).strip()
+    user_id     = str(data.get("userId")).strip()
+    username    = str(data.get("username")).strip()
+    issued_by   = str(data.get("issuedBy")).strip()
+
+    try:
+        append_row([
+            user_id, username, issued_by, "",   # no Discord ID for a Roblox-issued mod
+            reason, timestamp, warning_id, "FALSE", "", "",
+            "Roblox Game", restriction, start_date, end_date, warning_id
+        ])
+    except Exception as e:
+        print(f"[RobloxIngest] Append error: {e}")
+        return jsonify({"error": "sheet write failed"}), 502
+
+    print(f"[RobloxIngest] Logged violation {warning_id} for {username} ({user_id})")
+    return jsonify({"status": "ok", "incidentId": warning_id}), 200
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN     = os.environ.get("DISCORD_BOT_TOKEN", "")
 SPREADSHEET_ID    = "1JXMNLNhJjO55KYBeuec4PrEJPFcZUVJQen0XIoJikb8"
@@ -233,6 +274,10 @@ APPEAL_CHANNEL_ID  = 1505891264032149574
 TICKET_PANEL_CHANNEL_ID = 1427602068620972083  # Channel where /ticketpanel is posted
 
 GOOGLE_APPEAL_FORM_URL = "https://forms.gle/xCRB3RHfEu6YvhhP8"
+
+# Shared secret the Roblox in-game script must send in the X-Auth-Token header
+# when posting violations to /api/roblox/violation. Set this on Render.
+ROBLOX_INGEST_SECRET = os.environ.get("ROBLOX_INGEST_SECRET", "")
 
 SHEET_READ_URL    = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O"
 SHEET_APPEND_URL  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SHEET_NAME}!A:O:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
