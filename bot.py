@@ -449,14 +449,25 @@ async def dm_user(user, embed):
         return False
 
 async def update_discord_member(discord_id, roblox_user_id, roblox_username):
-    """Update Discord nickname and log to VerifiedUsers sheet."""
-    guild = bot.guilds[0]
-    try:
-        member = await guild.fetch_member(int(discord_id))
-        await member.edit(nick=roblox_username)
-        print(f"[Verify] Updated nickname for {discord_id} -> {roblox_username}")
-    except Exception as e:
-        print(f"[Verify] Failed to update nickname: {e}")
+    """Update Discord nickname (searching all guilds the bot is in) and log to VerifiedUsers sheet."""
+    member = None
+    for guild in bot.guilds:
+        try:
+            member = await guild.fetch_member(int(discord_id))
+            if member:
+                break
+        except Exception:
+            continue
+
+    if member:
+        try:
+            await member.edit(nick=roblox_username)
+            print(f"[Verify] Updated nickname for {discord_id} -> {roblox_username}")
+        except Exception as e:
+            print(f"[Verify] Failed to update nickname: {e}")
+    else:
+        print(f"[Verify] Member {discord_id} not found in any connected guild")
+
     # Log to sheet regardless of nickname success
     verified_users_log(discord_id, roblox_user_id, roblox_username)
 
@@ -467,7 +478,7 @@ async def update_status_embed():
         channel = bot.get_channel(STATUS_CHANNEL_ID)
         if not channel:
             return
-        resp = requests.get(STATUS_PAGE_URL, timeout=10)
+        resp = await asyncio.to_thread(requests.get, STATUS_PAGE_URL, timeout=10)
         if resp.status_code == 200:
             embed = build_status_embed(resp.json())
             try:
@@ -482,12 +493,12 @@ async def update_status_embed():
 async def temp_states_cleanup():
     """Purge expired TempStates rows every 5 minutes."""
     await bot.wait_until_ready()
-    temp_states_purge_expired()
+    await asyncio.to_thread(temp_states_purge_expired)
 
 @tasks.loop(hours=24)
 async def automatic_expiry_sweeper():
     print("[Sweeper] Starting automated infraction expiration analysis...")
-    rows = read_all_rows()
+    rows = await asyncio.to_thread(read_all_rows)
     if not rows:
         return
 
@@ -530,7 +541,7 @@ async def automatic_expiry_sweeper():
             row[COL_REVOKED]    = "TRUE"
             row[COL_REVOKED_BY] = "System Auto-Expiry"
             row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-            update_row(idx + 2, row)
+            await asyncio.to_thread(update_row, idx + 2, row)
             await asyncio.sleep(1)
 
 # ── Appeal System ──────────────────────────────────────────────────────────────
@@ -704,6 +715,9 @@ async def execute_live_punishment_revocation(guild: discord.Guild, row, admin_na
         except Exception as e:
             return f"Staff Suspension role error: {e}"
 
+    elif rest_type == "Ticket Ban":
+        return "Ticket Ban lifted (database flag cleared)"
+
     return "Database trail flagged"
 
 # ── Master Mod Action Engine ───────────────────────────────────────────────────
@@ -790,6 +804,16 @@ async def run_moderation_action(
     await interaction.followup.send(embed=embed)
 
 # ── Display Layout Engine ──────────────────────────────────────────────────────
+def _fit_field(text: str, limit: int = 980) -> str:
+    """Trim a field value to fit inside Discord's 1024-char field cap (with room for the code fence)."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit]
+    if "\n" in truncated:
+        truncated = truncated.rsplit("\n", 1)[0]
+    return truncated + "\n… (truncated — see the sheet for full history)"
+
 def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_url: str = None) -> discord.Embed:
     embed = discord.Embed(title=title_text, color=discord.Color.from_rgb(44, 62, 80))
     if thumbnail_url:
@@ -822,8 +846,8 @@ def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_u
     if not revoked_txt:
         revoked_txt = "No historical logs have been revoked or cleared.\n"
 
-    embed.add_field(name="⚠️ Active Infractions & Restrictions", value=f"```text\n{active_txt.strip()}\n```", inline=False)
-    embed.add_field(name="✅ Historical Archive (Revoked/Cleared Logs)", value=f"```text\n{revoked_txt.strip()}\n```", inline=False)
+    embed.add_field(name="⚠️ Active Infractions & Restrictions", value=f"```text\n{_fit_field(active_txt)}\n```", inline=False)
+    embed.add_field(name="✅ Historical Archive (Revoked/Cleared Logs)", value=f"```text\n{_fit_field(revoked_txt)}\n```", inline=False)
     embed.timestamp = datetime.datetime.utcnow()
     return embed
 
@@ -1188,6 +1212,11 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
     elif unit == "hours":   delta = datetime.timedelta(hours=duration_amount)
     else:                   delta = datetime.timedelta(days=duration_amount)
 
+    if delta > datetime.timedelta(days=28):
+        return await interaction.followup.send(
+            "❌ **Error:** Discord timeouts cannot exceed 28 days. Use `/ban` or `/staff_suspension` for longer restrictions."
+        )
+
     final_expiry_stamp = (datetime.datetime.utcnow() + delta).strftime("%Y-%m-%d %H:%M:%S UTC")
     await run_moderation_action(interaction, str(user.id), str(user), user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, timeout_duration=delta)
 
@@ -1289,7 +1318,7 @@ async def restoreroles(interaction: discord.Interaction):
 
 # ── Ticket System ──────────────────────────────────────────────────────────────
 # Sheet: Tickets (A=ticket_id, B=discord_id, C=channel_id, D=status, E=created_at)
-# Sheet: TicketBans (A=discord_id, B=banned_by, C=reason, D=timestamp)
+# Ticket bans live in the Violations sheet as restriction_type == "Ticket Ban"
 
 TICKETS_SHEET          = "Tickets"
 TICKETS_READ_URL       = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{TICKETS_SHEET}!A:E"
@@ -1376,10 +1405,13 @@ async def create_ticket_thread(channel: discord.TextChannel, user: discord.Membe
             reason=f"Support ticket {ticket_id} for {user}"
         )
     except (discord.HTTPException, discord.Forbidden):
-        # Fallback: public thread — no type argument needed
+        # Fallback: explicit public thread type, since the default create_thread()
+        # signature without a `message` also defaults to private_thread and would
+        # otherwise retry the exact same failing call.
         thread = await channel.create_thread(
             name=f"ticket-{user.name}-{ticket_id[:4]}",
             auto_archive_duration=10080,
+            type=discord.ChannelType.public_thread,
             reason=f"Support ticket {ticket_id} for {user}"
         )
 
@@ -1553,21 +1585,26 @@ async def ticketunban(interaction: discord.Interaction, user: discord.Member):
         return await interaction.response.send_message("❌ Admin only.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
 
-    try:
-        resp = requests.get(TICKET_BANS_READ_URL, headers=sheets_headers(), timeout=10)
-        rows = resp.json().get("values", [])
-        for i, row in enumerate(rows):
-            if len(row) >= 1 and row[0].strip() == str(user.id):
-                sheet_row = i + 1
-                range_str = f"{TICKET_BANS_SHEET}!A{sheet_row}:D{sheet_row}"
-                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
-                requests.post(url, headers=sheets_headers(), timeout=10)
-                await interaction.followup.send(f"✅ Ticket ban removed for {user.mention}.")
-                return
-    except Exception as e:
-        return await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+    # Ticket bans are stored as rows in the Violations sheet with
+    # restriction_type == "Ticket Ban" — revoke all active ones for this user.
+    revoked = []
+    for row, sheet_row in get_user_warnings(str(user.id)):
+        row = pad(row)
+        if row[COL_RESTRICTION].strip() != "Ticket Ban":
+            continue
+        if row[COL_REVOKED].strip().upper() == "TRUE":
+            continue
+        row[COL_REVOKED]    = "TRUE"
+        row[COL_REVOKED_BY] = str(interaction.user)
+        row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        update_row(sheet_row, row)
+        revoked.append(row[COL_INCIDENT_ID].strip())
 
-    await interaction.followup.send(f"⚠️ {user.mention} does not have an active ticket ban.", ephemeral=True)
+    if not revoked:
+        return await interaction.followup.send(f"⚠️ {user.mention} does not have an active ticket ban.", ephemeral=True)
+
+    case_list = ", ".join(f"`{c}`" for c in revoked)
+    await interaction.followup.send(f"✅ Ticket ban removed for {user.mention}. Case(s) revoked: {case_list}", ephemeral=True)
 
 @bot.tree.command(name="ticketreply", description="Reply to a ticket from DMs or anywhere — choose your open ticket")
 @app_commands.describe(message="The message to send into the ticket")
