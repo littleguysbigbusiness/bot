@@ -440,6 +440,34 @@ def get_user_warnings(user_id):
             results.append((row, i + 2))
     return results
 
+def get_linked_roblox_id(discord_id: str):
+    """Look up a verified Roblox user ID for a given Discord ID, or None."""
+    try:
+        resp = requests.get(VERIFIED_USERS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for row in rows:
+            if len(row) >= 2 and row[0].strip() == str(discord_id).strip():
+                return row[1].strip()
+    except Exception as e:
+        print(f"[VerifiedUsers] Lookup error: {e}")
+    return None
+
+def get_user_warnings_combined(discord_id: str):
+    """Return warnings matched by Discord ID, plus (if linked) their Roblox ID too.
+    Roblox-issued violations are logged under the Roblox user ID, not the Discord ID,
+    so a lookup by Discord ID alone misses them unless the account is verified/linked.
+    """
+    results = get_user_warnings(str(discord_id))
+
+    roblox_id = get_linked_roblox_id(discord_id)
+    if roblox_id:
+        seen_case_ids = {r[COL_INCIDENT_ID].strip() for r, _ in results}
+        for r, idx in get_user_warnings(roblox_id):
+            if r[COL_INCIDENT_ID].strip() not in seen_case_ids:
+                results.append((r, idx))
+
+    return results
+
 # ── Roles Backup Helpers ───────────────────────────────────────────────────────
 def save_suspended_roles(user_id, role_ids):
     data = {}
@@ -899,6 +927,11 @@ async def run_moderation_action(
     await interaction.followup.send(embed=embed)
 
 # ── Display Layout Engine ──────────────────────────────────────────────────────
+SOURCE_ICONS = {
+    "Discord": "💬",
+    "Roblox Game": "🎮",
+}
+
 def _fit_field(text: str, limit: int = 980) -> str:
     """Trim a field value to fit inside Discord's 1024-char field cap (with room for the code fence)."""
     text = text.strip()
@@ -926,7 +959,8 @@ def build_historical_log_embed(title_text: str, warnings_list: list, thumbnail_u
         expires  = r[COL_END_DATE].strip()
         is_revoked = r[COL_REVOKED].strip().upper() == "TRUE"
 
-        log_block = f"▪ Case ID: {case_id} | Type: {rest_type} | Context: {context}\n  Reason: {reason}\n  Issued: {issued} | Expires: {expires}\n"
+        source_icon = SOURCE_ICONS.get(context, "❔")
+        log_block = f"{source_icon} Case ID: {case_id} | Type: {rest_type} | Context: {context}\n  Reason: {reason}\n  Issued: {issued} | Expires: {expires}\n"
 
         if is_revoked:
             revoked_by = r[COL_REVOKED_BY].strip()
@@ -1234,7 +1268,7 @@ async def modstats(interaction: discord.Interaction):
 @bot.tree.command(name="appeal", description="Submit an appeal for an active infraction file")
 async def appeal(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    warnings = get_user_warnings(str(interaction.user.id))
+    warnings = get_user_warnings_combined(str(interaction.user.id))
     active_cases = [(r, idx) for r, idx in warnings if pad(r)[COL_REVOKED].upper() != "TRUE"]
     if not active_cases:
         return await interaction.followup.send("✅ You have no active warnings or restrictions to appeal!", ephemeral=True)
@@ -1243,7 +1277,7 @@ async def appeal(interaction: discord.Interaction):
 @bot.tree.command(name="viewmywarnings", description="View all your warnings (private)")
 async def viewmywarnings(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    warnings = get_user_warnings(str(interaction.user.id))
+    warnings = get_user_warnings_combined(str(interaction.user.id))
     embed = build_historical_log_embed("👤 Your Personal Compliance History", warnings, interaction.user.display_avatar.url)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1255,7 +1289,7 @@ async def viewwarnings(interaction: discord.Interaction, user_target: str):
     await interaction.response.defer()
 
     cleaned_id = extract_id(user_target)
-    warnings = get_user_warnings(cleaned_id)
+    warnings = get_user_warnings_combined(cleaned_id)
 
     thumb = None
     try:
@@ -1594,7 +1628,7 @@ class TicketOpenView(discord.ui.View):
     @discord.ui.button(label="📋 View My Warnings", style=discord.ButtonStyle.secondary, custom_id="ticket_view_warnings_btn")
     async def view_warnings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        warnings = get_user_warnings(str(interaction.user.id))
+        warnings = get_user_warnings_combined(str(interaction.user.id))
         embed = build_historical_log_embed("📋 Your Warning History", warnings, interaction.user.display_avatar.url)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
