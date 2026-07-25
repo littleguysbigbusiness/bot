@@ -225,8 +225,13 @@ def terms():
 @app.route('/api/roblox/violation', methods=['POST'])
 def api_roblox_violation():
     """Ingest endpoint for the Roblox in-game moderation panel.
-    Expects JSON: userId, username, issuedBy, reason, restriction,
-    optional startDate, endDate, incidentId.
+
+    action="add" (default): expects userId, username, issuedBy, reason,
+        restriction, optional startDate, endDate, incidentId.
+    action="revoke": expects incidentId, revokedBy — marks the matching
+        Violations row as revoked and lifts any live Discord-side punishment
+        (no-ops for Roblox-sourced rows since there's nothing to lift there).
+
     Requires header X-Auth-Token to match ROBLOX_INGEST_SECRET if set.
     """
     if ROBLOX_INGEST_SECRET:
@@ -234,7 +239,52 @@ def api_roblox_violation():
             return jsonify({"error": "unauthorized"}), 401
 
     data = request.get_json(force=True, silent=True) or {}
+    action = str(data.get("action") or "add").strip().lower()
 
+    if action == "revoke":
+        incident_id = str(data.get("incidentId", "")).strip()
+        revoked_by  = str(data.get("revokedBy", "")).strip() or "Roblox In-Game Panel"
+
+        if not incident_id:
+            return jsonify({"error": "Missing incidentId"}), 400
+
+        row, sheet_row = find_warning_by_id(incident_id)
+        if row is None:
+            return jsonify({"error": f"Case {incident_id} not found"}), 404
+        if row[COL_REVOKED].strip().upper() == "TRUE":
+            return jsonify({"status": "already_revoked", "incidentId": incident_id}), 200
+
+        lift_result = "Logged to Sheet (In-Game Context)"
+        if row[COL_SOURCE].strip() == "Discord":
+            # A Discord-side punishment was issued for this case; lift it live.
+            # Try each connected guild (bot.guilds[0] alone isn't safe — see
+            # update_discord_member for the same pattern).
+            for guild in bot.guilds:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        execute_live_punishment_revocation(guild, row, revoked_by),
+                        bot.loop
+                    )
+                    lift_result = future.result(timeout=10)
+                    break
+                except Exception as e:
+                    print(f"[RobloxIngest] Revoke lift error on guild {guild.id}: {e}")
+                    lift_result = f"Lift error: {e}"
+
+        row[COL_REVOKED]    = "TRUE"
+        row[COL_REVOKED_BY] = revoked_by
+        row[COL_REVOKED_AT] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        try:
+            update_row(sheet_row, row)
+        except Exception as e:
+            print(f"[RobloxIngest] Revoke write error: {e}")
+            return jsonify({"error": "sheet write failed"}), 502
+
+        print(f"[RobloxIngest] Revoked case {incident_id} via {revoked_by}: {lift_result}")
+        return jsonify({"status": "ok", "incidentId": incident_id, "liftResult": lift_result}), 200
+
+    # ── action == "add" ──────────────────────────────────────────────
     required = ["userId", "username", "issuedBy", "reason", "restriction"]
     missing = [f for f in required if not str(data.get(f, "")).strip()]
     if missing:
