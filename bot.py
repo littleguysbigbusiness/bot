@@ -335,6 +335,7 @@ ROBLOX_INGEST_SECRET = os.environ.get("ROBLOX_INGEST_SECRET", "")
 # GROUP_ID:  Numeric Roblox group ID to manage. Set as an env var on Render.
 GROUP_KEY = os.environ.get("GROUP_KEY", "")
 GROUP_ID  = os.environ.get("GROUP_ID", "")
+NUKE_PANEL_SECRET = os.environ.get("NUKE_PANEL_SECRET", "")
 OPEN_CLOUD_BASE = "https://apis.roblox.com/cloud/v2"
 
 def _open_cloud_headers():
