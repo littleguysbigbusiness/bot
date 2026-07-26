@@ -1354,11 +1354,31 @@ def nuke_panel():
         return "❌ Unauthorized. Missing or incorrect ?key=", 403
 
     key = request.args.get("key", "")
+
+    with nuke_lock:
+        pending = nuke_pending
+        triggered_at = nuke_last_triggered_at
+
+    status_html = ""
+    if pending:
+        status_html = f"""
+        <p style="color:#ffcc00;">⚠️ A nuke IS currently pending (armed at {triggered_at} UTC).</p>
+        <form method="POST" action="/nuke/cancel?key={key}" style="display:inline-block;">
+            <button type="submit" style="background:#2980b9;color:white;font-size:20px;padding:14px 40px;border:none;border-radius:8px;cursor:pointer;">
+                CANCEL PENDING NUKE
+            </button>
+        </form>
+        <hr style="margin:30px 0;border-color:#333;">
+        """
+    else:
+        status_html = "<p style='color:#8f8;'>No nuke currently pending.</p><hr style='margin:30px 0;border-color:#333;'>"
+
     return f"""
     <html>
     <head><title>Nuke Control</title></head>
     <body style="background:#111;color:#eee;font-family:sans-serif;text-align:center;padding-top:100px;">
         <h1 style="color:#ff4444;">☢️ Nuclear Detonation Control</h1>
+        {status_html}
         <p>Are you sure you want to trigger the nuke sequence in the live game?</p>
         <form method="POST" action="/nuke/execute?key={key}" style="display:inline-block;">
             <button type="submit" style="background:#c0392b;color:white;font-size:24px;padding:20px 50px;border:none;border-radius:8px;cursor:pointer;">
@@ -1369,8 +1389,7 @@ def nuke_panel():
         <a href="/" style="color:#888;">No, take me back</a>
     </body>
     </html>
-    """, 200
-
+    """, 200 
 @app.route('/nuke/execute', methods=['POST'])
 def nuke_execute():
     global nuke_pending, nuke_last_triggered_at
