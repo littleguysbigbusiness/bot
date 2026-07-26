@@ -1339,7 +1339,86 @@ async def send_message(interaction: discord.Interaction, channel_id: str, messag
         await interaction.followup.send(f"❌ Missing permissions to write in <#{cleaned_chan_id}>.")
     except Exception as e:
         await interaction.followup.send(f"❌ **Error:**\n```text\n{e}\n```")
+import threading
 
+nuke_lock = threading.Lock()
+nuke_pending = False
+nuke_last_triggered_at = None
+
+def _nuke_authorized(req):
+    return NUKE_PANEL_SECRET and req.args.get("key") == NUKE_PANEL_SECRET
+
+@app.route('/nuke', methods=['GET'])
+def nuke_panel():
+    if not _nuke_authorized(request):
+        return "❌ Unauthorized. Missing or incorrect ?key=", 403
+
+    key = request.args.get("key", "")
+    return f"""
+    <html>
+    <head><title>Nuke Control</title></head>
+    <body style="background:#111;color:#eee;font-family:sans-serif;text-align:center;padding-top:100px;">
+        <h1 style="color:#ff4444;">☢️ Nuclear Detonation Control</h1>
+        <p>Are you sure you want to trigger the nuke sequence in the live game?</p>
+        <form method="POST" action="/nuke/execute?key={key}" style="display:inline-block;">
+            <button type="submit" style="background:#c0392b;color:white;font-size:24px;padding:20px 50px;border:none;border-radius:8px;cursor:pointer;">
+                YES — TRIGGER NUKE
+            </button>
+        </form>
+        <br><br>
+        <a href="/" style="color:#888;">No, take me back</a>
+    </body>
+    </html>
+    """, 200
+
+@app.route('/nuke/execute', methods=['POST'])
+def nuke_execute():
+    global nuke_pending, nuke_last_triggered_at
+    if not _nuke_authorized(request):
+        return "❌ Unauthorized.", 403
+
+    with nuke_lock:
+        nuke_pending = True
+        nuke_last_triggered_at = datetime.datetime.utcnow().isoformat()
+
+    print(f"[Nuke] Pending flag set via web panel at {nuke_last_triggered_at}")
+
+    return """
+    <html><body style="background:#111;color:#0f0;font-family:sans-serif;text-align:center;padding-top:150px;">
+        <h1>☢️ Nuke sequence armed.</h1>
+        <p>The live game will pick this up on its next status check.</p>
+    </body></html>
+    """, 200
+
+@app.route('/nuke/status', methods=['GET'])
+def nuke_status():
+    """Roblox polls this. Returns whether a nuke is pending, WITHOUT clearing it —
+    the game must explicitly acknowledge via /nuke/acknowledge once it actually
+    starts running the sequence, so a dropped response doesn't lose the trigger."""
+    if ROBLOX_INGEST_SECRET:
+        if request.headers.get("X-Auth-Token", "") != ROBLOX_INGEST_SECRET:
+            return jsonify({"error": "unauthorized"}), 401
+
+    with nuke_lock:
+        pending = nuke_pending
+        triggered_at = nuke_last_triggered_at
+
+    return jsonify({"pending": pending, "triggeredAt": triggered_at}), 200
+
+@app.route('/nuke/acknowledge', methods=['POST'])
+def nuke_acknowledge():
+    """Roblox calls this once it has actually started the sequence, so the
+    flag clears and /nuke/status won't re-trigger it on the next poll."""
+    global nuke_pending
+    if ROBLOX_INGEST_SECRET:
+        if request.headers.get("X-Auth-Token", "") != ROBLOX_INGEST_SECRET:
+            return jsonify({"error": "unauthorized"}), 401
+
+    with nuke_lock:
+        nuke_pending = False
+
+    print("[Nuke] Trigger acknowledged and cleared by game server.")
+    return jsonify({"status": "ok"}), 200
 @bot.tree.command(name="edit_message", description="[Admin] Edit an existing bot message by its ID")
 @app_commands.describe(
     channel_id="The channel the message is in",
