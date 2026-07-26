@@ -1940,7 +1940,39 @@ async def ticketunban(interaction: discord.Interaction, user: discord.Member):
 
     case_list = ", ".join(f"`{c}`" for c in revoked)
     await interaction.followup.send(f"✅ Ticket ban removed for {user.mention}. Case(s) revoked: {case_list}", ephemeral=True)
+@app.route('/api/roblox/grouprank', methods=['POST'])
+def api_roblox_grouprank():
+    """In-game rank command hits this — mirrors the Discord /grouprank command."""
+    if ROBLOX_INGEST_SECRET:
+        if request.headers.get("X-Auth-Token", "") != ROBLOX_INGEST_SECRET:
+            return jsonify({"error": "unauthorized"}), 401
 
+    if not GROUP_KEY or not GROUP_ID:
+        return jsonify({"error": "GROUP_KEY or GROUP_ID not configured"}), 500
+
+    data = request.get_json(force=True, silent=True) or {}
+    roblox_user_id = str(data.get("userId", "")).strip()
+    rank_query     = str(data.get("rank", "")).strip()
+
+    if not roblox_user_id or not rank_query:
+        return jsonify({"error": "Missing userId or rank"}), 400
+
+    try:
+        role = group_find_role(rank_query)
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch roles: {e}"}), 502
+
+    if not role:
+        return jsonify({"error": f"No role matching '{rank_query}'"}), 404
+
+    try:
+        group_set_rank(roblox_user_id, role["id"])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Rank change failed: {e}"}), 502
+
+    return jsonify({"status": "ok", "role": role["displayName"], "rank": role["rank"]}), 200
 @bot.tree.command(name="ticketreply", description="Reply to a ticket from DMs or anywhere — choose your open ticket")
 @app_commands.describe(message="The message to send into the ticket")
 async def ticketreply(interaction: discord.Interaction, message: str):
