@@ -1633,7 +1633,24 @@ async def timeout_cmd(interaction: discord.Interaction, user: discord.Member, re
 
     final_expiry_stamp = (datetime.datetime.utcnow() + delta).strftime("%Y-%m-%d %H:%M:%S UTC")
     await run_moderation_action(interaction, str(user.id), str(user), user, reason, "Timeout", source.value if source else "Discord", final_expiry_stamp, timeout_duration=delta)
+@app.route('/nuke/cancel', methods=['POST'])
+def nuke_cancel():
+    global nuke_pending
+    if not _nuke_authorized(request):
+        return "❌ Unauthorized.", 403
 
+    with nuke_lock:
+        was_pending = nuke_pending
+        nuke_pending = False
+
+    print(f"[Nuke] Cancelled via web panel (was pending: {was_pending})")
+
+    return """
+    <html><body style="background:#111;color:#0af;font-family:sans-serif;text-align:center;padding-top:150px;">
+        <h1>✅ Nuke cancelled.</h1>
+        <p>The pending trigger has been cleared before the game picked it up.</p>
+    </body></html>
+    """, 200
 @bot.tree.command(name="ban", description="[Admin] Ban a user from the server")
 @app_commands.describe(user_target="The ID or mention of the user to ban", reason="Reason for ban", source="Platform context", end_date="Optional expiry date (YYYY-MM-DD)")
 @app_commands.choices(source=[app_commands.Choice(name="Discord Server", value="Discord"), app_commands.Choice(name="Roblox In-Game", value="Roblox Game")])
