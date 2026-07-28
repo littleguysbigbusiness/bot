@@ -32,7 +32,11 @@ DISCORD_API = "https://discord.com/api"
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-DASHBOARD_GUILD_ID = os.environ.get("DASHBOARD_GUILD_ID") or os.environ.get("STAFF_GUILD_ID", "")
+DASHBOARD_GUILD_ID = (
+    os.environ.get("DASHBOARD_GUILD_ID")
+    or os.environ.get("STAFF_GUILD_ID")
+    or "1426723848379699350"
+)
 STAFF_CALLBACK_URL = os.environ.get("STAFF_CALLBACK_URL", "https://bot-h57e.onrender.com/staff/callback")
 
 ROBLOX_OPEN_CLOUD_KEY = os.environ.get("ROBLOX_OPEN_CLOUD_KEY", "")
