@@ -51,6 +51,7 @@ KNOWN_PERMISSIONS = {
     "list_players": "View player list",
     "kick_player": "Kick a player",
     "announce": "Send an announcement",
+    "manage_site": "Edit site content (Home/Careers text)",
 }
 # Reserved: never grantable via the roles sheet, only ever held by a true
 # Discord Administrator on the guild. Prevents the permission system from
@@ -198,6 +199,104 @@ def _permissions_delete(role_id: str):
                 return
     except Exception as e:
         print(f"[StaffDashboard] Permissions delete error: {e}")
+
+
+# ── SiteContent sheet (Key | Value) — editable text shown on the public pages ──
+
+SITE_CONTENT_SHEET = "SiteContent"
+_site_sheet_checked = False
+
+DEFAULT_SITE_CONTENT = {
+    "weeks_count": "6",
+    "bus_driver_status": "Closed",
+    "latest_title": "Ryde Buses Now Under Testing",
+    "latest_body": "New Managers have been hired. Managers: Unclebob (Bus Driver), Supergoodhelp (Bus Driver), "
+                   "Mr.Eual (Bus Marshal) and Levitty (Bus Marshal).",
+    "stat_passenger_journeys": "0",
+    "stat_buses_in_fleet": "8",
+    "stat_employees": "8",
+    "stat_depots": "2",
+    "our_people": json.dumps([
+        {"name": "Awesomebuilderaiden", "title": "CEO",
+         "quote": "I love Busways because I get to drive buses and work on the game. I am certain you will enjoy it."},
+        {"name": "Unclebob119", "title": "Bus Driver Manager",
+         "quote": "Being able to empower our staff with the tools and support they need to do their best is the "
+                   "thing I enjoy the most. Every day provides an opportunity to learn."},
+    ]),
+}
+
+
+def _site_content_sheet_urls():
+    from bot import SPREADSHEET_ID
+    read_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SITE_CONTENT_SHEET}!A:B"
+    append_url = f"{read_url}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+    return read_url, append_url
+
+
+def _ensure_site_content_sheet():
+    global _site_sheet_checked
+    if _site_sheet_checked:
+        return
+    _site_sheet_checked = True
+    from bot import sheets_headers, SPREADSHEET_ID
+    read_url, _ = _site_content_sheet_urls()
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        if resp.ok:
+            return
+        requests.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}:batchUpdate",
+            headers=sheets_headers(),
+            json={"requests": [{"addSheet": {"properties": {"title": SITE_CONTENT_SHEET}}}]},
+            timeout=10,
+        )
+        header_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{SITE_CONTENT_SHEET}!A1:B1?valueInputOption=RAW"
+        requests.put(header_url, headers=sheets_headers(), json={"values": [["Key", "Value"]]}, timeout=10)
+        print(f"[StaffDashboard] Created '{SITE_CONTENT_SHEET}' sheet tab")
+    except Exception as e:
+        print(f"[StaffDashboard] Could not verify/create '{SITE_CONTENT_SHEET}' sheet: {e}")
+
+
+def get_site_content() -> dict:
+    from bot import sheets_headers
+    _ensure_site_content_sheet()
+    read_url, _ = _site_content_sheet_urls()
+    values = dict(DEFAULT_SITE_CONTENT)
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for row in rows[1:]:  # skip header
+            if len(row) >= 1 and row[0].strip():
+                values[row[0].strip()] = row[1] if len(row) >= 2 else ""
+    except Exception as e:
+        print(f"[StaffDashboard] Site content read error: {e}")
+    return values
+
+
+def _site_content_upsert(key: str, value: str):
+    from bot import sheets_headers, SPREADSHEET_ID
+    read_url, append_url = _site_content_sheet_urls()
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if len(row) >= 1 and row[0].strip() == key:
+                sheet_row = i + 1
+                range_str = f"{SITE_CONTENT_SHEET}!A{sheet_row}:B{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}?valueInputOption=RAW"
+                requests.put(url, headers=sheets_headers(), json={"values": [[key, value]]}, timeout=10)
+                return
+        requests.post(append_url, headers=sheets_headers(), json={"values": [[key, value]]}, timeout=10)
+    except Exception as e:
+        print(f"[StaffDashboard] Site content upsert error: {e}")
+
+
+def save_site_content(updates: dict):
+    _ensure_site_content_sheet()
+    for key, value in updates.items():
+        _site_content_upsert(key, value)
 
 
 def _compute_permissions(member) -> set:
@@ -428,6 +527,8 @@ def _nav(active: str = ""):
     links = [link("/staff/", "Home", "home")]
     if _is_logged_in():
         links.append(link("/staff/drivers-info", "Drivers Info", "drivers"))
+        if _has_permission("manage_site"):
+            links.append(link("/staff/site-management", "Site Management", "site"))
         if _has_permission(MANAGE_PERMISSIONS):
             links.append(link("/staff/permissions", "Permissions Manager", "permissions"))
 
@@ -505,7 +606,7 @@ PUBLIC_HOME_HTML = """
 <body>
 {{ nav|safe }}
 <div class="hero">
-  <h1>Over 6 Weeks of Connecting people, communities and journeys</h1>
+  <h1>Over {{ content.weeks_count }} Weeks of Connecting people, communities and journeys</h1>
   <a class="btn secondary" href="/about-us">About Us</a>
 </div>
 <main>
@@ -517,23 +618,25 @@ PUBLIC_HOME_HTML = """
 
   <div class="card">
     <h2>The latest at Busways</h2>
-    <p><b>Ryde Buses Now Under Testing</b></p>
-    <p class="hint">New Managers have been hired. Managers: Unclebob (Bus Driver), Supergoodhelp (Bus Driver), Mr.Eual (Bus Marshal) and Levitty (Bus Marshal).</p>
+    <p><b>{{ content.latest_title }}</b></p>
+    <p class="hint">{{ content.latest_body }}</p>
   </div>
 
   <div class="grid">
-    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">0</h2><p class="hint">Passenger journeys</p></div>
-    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">8</h2><p class="hint">Buses in fleet</p></div>
-    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">8</h2><p class="hint">Employees at Busways</p></div>
-    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">2</h2><p class="hint">Depots owned by Busways</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">{{ content.stat_passenger_journeys }}</h2><p class="hint">Passenger journeys</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">{{ content.stat_buses_in_fleet }}</h2><p class="hint">Buses in fleet</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">{{ content.stat_employees }}</h2><p class="hint">Employees at Busways</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">{{ content.stat_depots }}</h2><p class="hint">Depots owned by Busways</p></div>
   </div>
 
   <div class="card">
     <h2>Our People</h2>
-    <p><b>Awesomebuilderaiden</b> — CEO</p>
-    <p class="hint">"I love Busways because I get to drive buses and work on the game. I am certain you will enjoy it."</p>
-    <p style="margin-top:14px;"><b>Unclebob119</b> — Bus Driver Manager</p>
-    <p class="hint">"Being able to empower our staff with the tools and support they need to do their best is the thing I enjoy the most. Every day provides an opportunity to learn."</p>
+    {% for person in people %}
+    <p{% if not loop.first %} style="margin-top:14px;"{% endif %}><b>{{ person.name }}</b> — {{ person.title }}</p>
+    <p class="hint">"{{ person.quote }}"</p>
+    {% else %}
+    <p class="hint">No team bios added yet.</p>
+    {% endfor %}
   </div>
 </main>
 {{ footer|safe }}
@@ -542,7 +645,12 @@ PUBLIC_HOME_HTML = """
 
 
 def render_public_home():
-    return render_template_string(PUBLIC_HOME_HTML, style=BASE_STYLE, nav=_public_nav("home"), footer=_public_footer())
+    content = get_site_content()
+    try:
+        people = json.loads(content.get("our_people", "[]"))
+    except Exception:
+        people = []
+    return render_template_string(PUBLIC_HOME_HTML, style=BASE_STYLE, nav=_public_nav("home"), footer=_public_footer(), content=content, people=people)
 
 
 CAREERS_HTML = """
@@ -552,7 +660,7 @@ CAREERS_HTML = """
 <main>
   <div class="card">
     <h2>Careers</h2>
-    <p><b>Bus Driver Applications Status: Closed</b></p>
+    <p><b>Bus Driver Applications Status: {{ content.bus_driver_status }}</b></p>
     <p class="hint">To apply, join the game or go to the Google Form to apply.</p>
   </div>
 </main>
@@ -562,7 +670,7 @@ CAREERS_HTML = """
 
 
 def render_careers():
-    return render_template_string(CAREERS_HTML, style=BASE_STYLE, nav=_public_nav("careers"), footer=_public_footer())
+    return render_template_string(CAREERS_HTML, style=BASE_STYLE, nav=_public_nav("careers"), footer=_public_footer(), content=get_site_content())
 
 
 CUSTOMER_INFO_HTML = """
@@ -657,6 +765,13 @@ LANDING_HTML = """
       <a class="btn secondary" href="/staff/drivers-info">Open</a>
     </div>
     {% endif %}
+    {% if can_manage_site %}
+    <div class="card">
+      <h2>Site Management</h2>
+      <p class="hint">Edit the Home page stats, news, and Careers status.</p>
+      <a class="btn secondary" href="/staff/site-management">Open</a>
+    </div>
+    {% endif %}
     {% if can_manage_permissions %}
     <div class="card">
       <h2>Permissions Manager</h2>
@@ -679,6 +794,7 @@ def landing():
         nav=_nav("home"),
         logged_in=_is_logged_in(),
         can_drivers=_has_permission("list_players") or _has_permission("kick_player") or _has_permission("announce"),
+        can_manage_site=_has_permission("manage_site"),
         can_manage_permissions=_has_permission(MANAGE_PERMISSIONS),
     )
 
@@ -760,6 +876,153 @@ def drivers_info():
         can_kick=can_kick,
         can_announce=can_announce,
     )
+
+
+SITE_MANAGEMENT_HTML = """
+<html><head><title>Site Management — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>Home page</h2>
+    <p class="hint">Controls the hero heading, news card, and stats on the public Home page.</p>
+    <label>Weeks of connecting people<br><input id="weeksCount" type="number" min="0" value="{{ content.weeks_count }}" style="width:100px;"></label>
+    <div style="margin-top:14px;">
+      <label>Latest news title<br><input id="latestTitle" value="{{ content.latest_title }}" style="width:100%;"></label>
+    </div>
+    <div style="margin-top:10px;">
+      <label>Latest news body<br><textarea id="latestBody" rows="3" style="width:100%;font-family:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--border);border-radius:6px;">{{ content.latest_body }}</textarea></label>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:16px;flex-wrap:wrap;">
+      <label>Passenger journeys<br><input id="statPassengers" type="number" value="{{ content.stat_passenger_journeys }}" style="width:100px;"></label>
+      <label>Buses in fleet<br><input id="statBuses" type="number" value="{{ content.stat_buses_in_fleet }}" style="width:100px;"></label>
+      <label>Employees<br><input id="statEmployees" type="number" value="{{ content.stat_employees }}" style="width:100px;"></label>
+      <label>Depots<br><input id="statDepots" type="number" value="{{ content.stat_depots }}" style="width:100px;"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Careers page</h2>
+    <label>Bus Driver Applications status<br>
+      <select id="busDriverStatus">
+        <option value="Open" {% if content.bus_driver_status == "Open" %}selected{% endif %}>Open</option>
+        <option value="Closed" {% if content.bus_driver_status == "Closed" %}selected{% endif %}>Closed</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="card">
+    <h2>Our People</h2>
+    <p class="hint">Team bios shown on the Home page.</p>
+    <div id="peopleRows"></div>
+    <button type="button" onclick="addPersonRow()">+ Add person</button>
+  </div>
+
+  <button class="btn" onclick="saveSiteContent()">Save changes</button>
+  <pre class="output" id="saveResult"></pre>
+</main>
+<script>
+const initialPeople = {{ people|tojson }};
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function personRowHtml(p) {
+  p = p || {name:"", title:"", quote:""};
+  return `<div class="personRow" style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:10px;">
+    <input class="pName" placeholder="Name" value="${escapeHtml(p.name)}" style="width:200px;">
+    <input class="pTitle" placeholder="Title" value="${escapeHtml(p.title)}" style="width:200px;">
+    <button type="button" class="danger" onclick="this.closest('.personRow').remove()">Remove</button><br>
+    <textarea class="pQuote" placeholder="Quote" rows="2" style="width:100%;margin-top:6px;font-family:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--border);border-radius:6px;">${escapeHtml(p.quote)}</textarea>
+  </div>`;
+}
+
+function addPersonRow(p) {
+  document.getElementById("peopleRows").insertAdjacentHTML("beforeend", personRowHtml(p));
+}
+
+initialPeople.forEach(addPersonRow);
+
+async function saveSiteContent() {
+  const people = Array.from(document.querySelectorAll(".personRow")).map(row => ({
+    name: row.querySelector(".pName").value,
+    title: row.querySelector(".pTitle").value,
+    quote: row.querySelector(".pQuote").value,
+  }));
+  const body = {
+    weeks_count: document.getElementById("weeksCount").value,
+    latest_title: document.getElementById("latestTitle").value,
+    latest_body: document.getElementById("latestBody").value,
+    stat_passenger_journeys: document.getElementById("statPassengers").value,
+    stat_buses_in_fleet: document.getElementById("statBuses").value,
+    stat_employees: document.getElementById("statEmployees").value,
+    stat_depots: document.getElementById("statDepots").value,
+    bus_driver_status: document.getElementById("busDriverStatus").value,
+    people,
+  };
+  document.getElementById("saveResult").textContent = "Saving...";
+  const res = await fetch("/staff/api/site-content", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+  });
+  document.getElementById("saveResult").textContent = JSON.stringify(await res.json(), null, 2);
+}
+</script>
+</body></html>
+"""
+
+
+@staff_bp.route("/site-management")
+def site_management_page():
+    guard = _require_permission("manage_site")
+    if guard:
+        return guard
+    content = get_site_content()
+    try:
+        people = json.loads(content.get("our_people", "[]"))
+    except Exception:
+        people = []
+    return render_template_string(
+        SITE_MANAGEMENT_HTML,
+        style=BASE_STYLE,
+        nav=_nav("site"),
+        content=content,
+        people=people,
+    )
+
+
+@staff_bp.route("/api/site-content", methods=["POST"])
+def api_site_content_save():
+    guard = _api_permission_guard("manage_site")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+
+    updates = {
+        "weeks_count": str(data.get("weeks_count", "")).strip() or "0",
+        "bus_driver_status": "Open" if str(data.get("bus_driver_status", "")).strip().lower() == "open" else "Closed",
+        "latest_title": str(data.get("latest_title", "")).strip()[:200],
+        "latest_body": str(data.get("latest_body", "")).strip()[:1000],
+        "stat_passenger_journeys": str(data.get("stat_passenger_journeys", "")).strip() or "0",
+        "stat_buses_in_fleet": str(data.get("stat_buses_in_fleet", "")).strip() or "0",
+        "stat_employees": str(data.get("stat_employees", "")).strip() or "0",
+        "stat_depots": str(data.get("stat_depots", "")).strip() or "0",
+    }
+
+    clean_people = []
+    for p in (data.get("people") or [])[:20]:
+        if isinstance(p, dict) and (p.get("name") or p.get("quote")):
+            clean_people.append({
+                "name": str(p.get("name", "")).strip()[:80],
+                "title": str(p.get("title", "")).strip()[:80],
+                "quote": str(p.get("quote", "")).strip()[:500],
+            })
+    updates["our_people"] = json.dumps(clean_people)
+
+    save_site_content(updates)
+    print(f"[StaffDashboard] {session.get('staff_name')} updated site content")
+    return jsonify({"ok": True})
 
 
 PERMISSIONS_HTML = """
