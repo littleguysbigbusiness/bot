@@ -19,7 +19,7 @@ from google.auth.transport.requests import Request
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
-from staff_dashboard import staff_bp
+from staff_dashboard import staff_bp, render_public_home
 app.register_blueprint(staff_bp)
 
 # ── Sheet-backed Pending Verifications ────────────────────────────────────────
@@ -130,7 +130,7 @@ def is_already_verified(user_id: int) -> bool:
 # ── Flask Routes ───────────────────────────────────────────────────────────────
 @app.route('/')
 def home():
-    return "BWR7 Warnings Bot is Online Framework Stable!", 200
+    return render_public_home()
 
 @app.route('/callback', methods=['GET'])
 def callback():

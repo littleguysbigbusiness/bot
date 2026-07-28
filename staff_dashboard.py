@@ -336,14 +336,17 @@ def logout():
 
 
 # ── UI ───────────────────────────────────────────────────────────────────
-# Styled to echo sites.google.com/view/bwr7r/home — white background, blue
-# accent, top nav with wordmark + links, card sections.
+# Busways brand colors, pulled from the live computed styles on
+# sites.google.com/view/bwr7r/home: indigo header band (#3F51B5) + orange
+# accent used on every button/link/CTA there (#FF9900).
 
 BASE_STYLE = """
 <style>
   :root {
-    --bg: #ffffff; --bg-alt: #f8f9fa; --border: #dadce0;
-    --text: #202124; --muted: #5f6368; --accent: #1a73e8; --accent-dark: #174ea6;
+    --bg: #ffffff; --bg-alt: #f2f2f2; --border: #dadce0;
+    --text: #1f2020; --muted: #5e5e5e;
+    --primary: #3f51b5; --primary-dark: #303f9f;
+    --accent: #ff9900; --accent-dark: #cc7a00;
     --danger: #d93025; --radius: 8px;
   }
   * { box-sizing: border-box; }
@@ -351,29 +354,31 @@ BASE_STYLE = """
     background: var(--bg); color: var(--text); margin: 0;
     font-family: "Google Sans", Roboto, -apple-system, "Segoe UI", sans-serif;
   }
-  a { color: var(--accent); text-decoration: none; }
+  a { color: var(--accent-dark); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .nav {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 32px; border-bottom: 1px solid var(--border); background: var(--bg);
+    padding: 14px 32px; background: var(--primary); color: #fff;
   }
-  .nav .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 500; color: var(--text); }
+  .nav .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 500; color: #fff; }
   .nav .links { display: flex; align-items: center; gap: 24px; font-size: 14px; }
-  .nav .links a { color: var(--muted); }
-  .nav .links a:hover { color: var(--text); text-decoration: none; }
-  .nav .who { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .nav .links a { color: rgba(255,255,255,0.85); }
+  .nav .links a:hover { color: #fff; text-decoration: none; }
+  .nav .who { display: flex; align-items: center; gap: 10px; font-size: 13px; color: rgba(255,255,255,0.85); }
+  .nav .who a { color: rgba(255,255,255,0.85); }
+  .nav .who a:hover { color: #fff; }
   .nav img.avatar { width: 26px; height: 26px; border-radius: 50%; }
   .btn {
     display: inline-block; background: var(--accent); color: #fff; border: none;
     border-radius: 20px; padding: 9px 20px; font-size: 14px; font-weight: 500; cursor: pointer;
   }
   .btn:hover { background: var(--accent-dark); text-decoration: none; }
-  .btn.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+  .btn.secondary { background: transparent; color: var(--primary); border: 1px solid var(--border); }
   .btn.secondary:hover { background: var(--bg-alt); }
   .btn.danger { background: var(--danger); }
   .btn.danger:hover { background: #a50e0e; }
   .hero { background: var(--bg-alt); padding: 56px 32px; text-align: center; }
-  .hero h1 { font-size: 32px; margin: 0 0 10px; font-weight: 500; }
+  .hero h1 { font-size: 32px; margin: 0 0 10px; font-weight: 500; color: var(--primary); }
   .hero p { color: var(--muted); font-size: 16px; margin: 0 0 24px; }
   main { max-width: 760px; margin: 0 auto; padding: 32px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 8px; }
@@ -387,12 +392,12 @@ BASE_STYLE = """
     background: #fff; border: 1px solid var(--border); color: var(--text);
     border-radius: 6px; padding: 9px 11px; font-size: 14px; margin: 4px 6px 4px 0;
   }
-  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input:focus, select:focus { outline: none; border-color: var(--primary); }
   button:not(.btn) {
-    background: var(--bg-alt); color: var(--accent-dark); border: 1px solid var(--border);
+    background: var(--bg-alt); color: var(--primary-dark); border: 1px solid var(--border);
     border-radius: 6px; padding: 9px 16px; font-size: 14px; cursor: pointer;
   }
-  button:not(.btn):hover { background: #eef2fc; }
+  button:not(.btn):hover { background: #e8eaf6; }
   button.danger { color: var(--danger); border-color: #f3c6c2; }
   button.danger:hover { background: #fdecea; }
   pre.output {
@@ -415,7 +420,7 @@ BASE_STYLE = """
 
 def _nav(active: str = ""):
     def link(href, label, key):
-        cls = ' style="color:var(--text);font-weight:500;"' if key == active else ""
+        cls = ' style="color:#fff;font-weight:600;"' if key == active else ""
         return f'<a href="{href}"{cls}>{label}</a>'
 
     links = [link("/staff/", "Home", "home")]
@@ -433,7 +438,7 @@ def _nav(active: str = ""):
 
     return f"""
     <div class="nav">
-      <div class="brand">🚌 Busways Region 7 Roblox</div>
+      <a href="/" class="brand" style="text-decoration:none;">🚌 Busways Region 7 Roblox</a>
       <div class="links">{''.join(links)}</div>
       <div class="who">{who}</div>
     </div>
@@ -454,6 +459,59 @@ def _error_page(code: int, title: str, message: str):
     </body></html>
     """
     return body, code
+
+
+GOOGLE_SITE_BASE = "https://sites.google.com/view/bwr7r"
+DISCORD_INVITE = "https://discord.gg/Bhwj8MPZ"
+
+PUBLIC_HOME_HTML = """
+<html><head><title>Busways Region 7 Roblox</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<div class="hero">
+  <h1>Connecting people, communities, and journeys</h1>
+  <p>Busways Region | 7 — a Roblox bus transit experience.</p>
+  <a class="btn" href="{{ site_base }}/careers">Become a Driver</a>
+</div>
+<main>
+  <div class="grid">
+    <div class="card">
+      <h2>Careers</h2>
+      <p class="hint">Current opportunities to join the team.</p>
+      <a class="btn secondary" href="{{ site_base }}/careers">View openings</a>
+    </div>
+    <div class="card">
+      <h2>Customer Info</h2>
+      <p class="hint">Routes, fares, and rider information.</p>
+      <a class="btn secondary" href="{{ site_base }}/customer-info">View info</a>
+    </div>
+    <div class="card">
+      <h2>About Us</h2>
+      <p class="hint">Who we are and how Busways runs.</p>
+      <a class="btn secondary" href="{{ site_base }}/about-us">Learn more</a>
+    </div>
+    <div class="card">
+      <h2>Staff Portal</h2>
+      <p class="hint">Live game operations for staff — Discord login required.</p>
+      <a class="btn secondary" href="/staff/">Open</a>
+    </div>
+  </div>
+</main>
+<div class="nav" style="justify-content:center;font-size:13px;">
+  <span>Join us on Discord: <a href="{{ discord_invite }}" style="color:#fff;text-decoration:underline;">{{ discord_invite }}</a></span>
+</div>
+</body></html>
+"""
+
+
+def render_public_home():
+    return render_template_string(
+        PUBLIC_HOME_HTML,
+        style=BASE_STYLE,
+        nav=_nav("home"),
+        site_base=GOOGLE_SITE_BASE,
+        discord_invite=DISCORD_INVITE,
+    )
 
 
 LANDING_HTML = """
