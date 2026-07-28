@@ -1,9 +1,12 @@
 """Staff web dashboard for Busways Region | 7.
 
-Auth: Discord OAuth2 (identify scope). The authenticated Discord user must be
-a member of STAFF_GUILD_ID with administrator/manage_guild/moderate_members —
-the same bar as is_admin() in bot.py, just checked outside a slash-command
-Interaction.
+Auth: Discord OAuth2 (identify scope). Any member of DASHBOARD_GUILD_ID can
+log in; what they can actually do is governed by per-role permissions stored
+in the "StaffPermissions" Google Sheet tab (RoleID | RoleName | Permissions),
+editable by admins from /staff/permissions. True Discord `administrator`
+permission on the guild always grants every permission, including
+manage_permissions itself — that's a hard floor so the permission system
+can't lock everyone out of configuring itself.
 
 Command delivery: curated actions only (never raw code) are published to the
 live game over Roblox Open Cloud MessagingService; results are read back from
@@ -16,6 +19,7 @@ import os
 import time
 import uuid
 import json
+import html
 import secrets
 import asyncio
 import urllib.parse
@@ -28,7 +32,7 @@ DISCORD_API = "https://discord.com/api"
 
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
-STAFF_GUILD_ID = os.environ.get("STAFF_GUILD_ID", "")
+DASHBOARD_GUILD_ID = os.environ.get("DASHBOARD_GUILD_ID") or os.environ.get("STAFF_GUILD_ID", "")
 STAFF_CALLBACK_URL = os.environ.get("STAFF_CALLBACK_URL", "https://bot-h57e.onrender.com/staff/callback")
 
 ROBLOX_OPEN_CLOUD_KEY = os.environ.get("ROBLOX_OPEN_CLOUD_KEY", "")
@@ -36,6 +40,18 @@ ROBLOX_UNIVERSE_ID = os.environ.get("ROBLOX_UNIVERSE_ID", "8938366983")
 
 MESSAGING_TOPIC = "ClaudeCommands"
 RESULTS_DATASTORE = "ClaudeRelayResults"
+
+# Single source of truth for grantable permissions. Add a new (key, label)
+# pair here, plus a route + action handler, to extend the dashboard later.
+KNOWN_PERMISSIONS = {
+    "list_players": "View player list",
+    "kick_player": "Kick a player",
+    "announce": "Send an announcement",
+}
+# Reserved: never grantable via the roles sheet, only ever held by a true
+# Discord Administrator on the guild. Prevents the permission system from
+# being able to lock admins out of configuring itself.
+MANAGE_PERMISSIONS = "manage_permissions"
 
 
 # ── Open Cloud relay (mirrors game-scripts/ClaudeRelay.server.lua) ─────────
@@ -79,22 +95,140 @@ def run_action_live(action: str, params: dict = None, timeout_s: float = 20.0):
     raise TimeoutError("Timed out waiting for the live game to respond. Is a server instance online?")
 
 
+# ── StaffPermissions sheet (RoleID | RoleName | Permissions) ───────────────
+# Uses the same spreadsheet/service-account credentials bot.py already sets
+# up. Imports from bot are deferred (inside functions) since staff_dashboard
+# is imported by bot.py before those names exist at module scope.
+
+STAFF_PERMISSIONS_SHEET = "StaffPermissions"
+_sheet_checked = False
+
+
+def _sheet_urls():
+    from bot import SPREADSHEET_ID
+    read_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STAFF_PERMISSIONS_SHEET}!A:C"
+    append_url = f"{read_url}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+    return read_url, append_url
+
+
+def _ensure_sheet_exists():
+    global _sheet_checked
+    if _sheet_checked:
+        return
+    _sheet_checked = True
+    from bot import sheets_headers, SPREADSHEET_ID
+    read_url, _ = _sheet_urls()
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        if resp.ok:
+            return
+        requests.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}:batchUpdate",
+            headers=sheets_headers(),
+            json={"requests": [{"addSheet": {"properties": {"title": STAFF_PERMISSIONS_SHEET}}}]},
+            timeout=10,
+        )
+        header_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{STAFF_PERMISSIONS_SHEET}!A1:C1?valueInputOption=RAW"
+        requests.put(header_url, headers=sheets_headers(), json={"values": [["RoleID", "RoleName", "Permissions"]]}, timeout=10)
+        print(f"[StaffDashboard] Created '{STAFF_PERMISSIONS_SHEET}' sheet tab")
+    except Exception as e:
+        print(f"[StaffDashboard] Could not verify/create '{STAFF_PERMISSIONS_SHEET}' sheet: {e}")
+
+
+def _permissions_read():
+    from bot import sheets_headers
+    _ensure_sheet_exists()
+    read_url, _ = _sheet_urls()
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+    except Exception as e:
+        print(f"[StaffDashboard] Permissions read error: {e}")
+        return []
+    out = []
+    for row in rows[1:]:  # skip header
+        if len(row) >= 2 and row[0].strip():
+            perms = [p.strip() for p in row[2].split(",") if p.strip()] if len(row) >= 3 else []
+            out.append({"role_id": row[0].strip(), "role_name": row[1].strip(), "permissions": perms})
+    return out
+
+
+def _permissions_upsert(role_id: str, role_name: str, permissions: list):
+    from bot import sheets_headers, SPREADSHEET_ID
+    _ensure_sheet_exists()
+    read_url, append_url = _sheet_urls()
+    perms_str = ",".join(p for p in permissions if p in KNOWN_PERMISSIONS)
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if len(row) >= 1 and row[0].strip() == str(role_id).strip():
+                sheet_row = i + 1
+                range_str = f"{STAFF_PERMISSIONS_SHEET}!A{sheet_row}:C{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}?valueInputOption=RAW"
+                requests.put(url, headers=sheets_headers(), json={"values": [[role_id, role_name, perms_str]]}, timeout=10)
+                return
+        requests.post(append_url, headers=sheets_headers(), json={"values": [[role_id, role_name, perms_str]]}, timeout=10)
+    except Exception as e:
+        print(f"[StaffDashboard] Permissions upsert error: {e}")
+
+
+def _permissions_delete(role_id: str):
+    from bot import sheets_headers, SPREADSHEET_ID
+    read_url, _ = _sheet_urls()
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if len(row) >= 1 and row[0].strip() == str(role_id).strip():
+                sheet_row = i + 1
+                range_str = f"{STAFF_PERMISSIONS_SHEET}!A{sheet_row}:C{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
+                requests.post(url, headers=sheets_headers(), timeout=10)
+                return
+    except Exception as e:
+        print(f"[StaffDashboard] Permissions delete error: {e}")
+
+
+def _compute_permissions(member) -> set:
+    if member.guild_permissions.administrator:
+        return set(KNOWN_PERMISSIONS.keys()) | {MANAGE_PERMISSIONS}
+    role_ids = {str(r.id) for r in member.roles}
+    granted = set()
+    for row in _permissions_read():
+        if row["role_id"] in role_ids:
+            granted.update(p for p in row["permissions"] if p in KNOWN_PERMISSIONS)
+    return granted
+
+
 # ── Auth ─────────────────────────────────────────────────────────────────
 
 def _is_logged_in() -> bool:
     return bool(session.get("staff_discord_id"))
 
 
-def _require_staff():
-    """Returns a redirect response if not authorized, else None."""
+def _has_permission(action: str) -> bool:
+    return action in session.get("staff_permissions", [])
+
+
+def _require_permission(action: str):
+    """Returns a Flask response to short-circuit with if unauthorized, else None."""
     if not _is_logged_in():
         return redirect("/staff/login")
+    if not _has_permission(action):
+        return "You don't have permission to do that. Ask an admin to grant your role access in Permissions Manager.", 403
     return None
 
 
-def _api_guard():
+def _api_permission_guard(action: str):
     if not _is_logged_in():
         return jsonify({"error": "not logged in"}), 401
+    if not _has_permission(action):
+        return jsonify({"error": "forbidden", "missingPermission": action}), 403
     return None
 
 
@@ -148,17 +282,22 @@ def callback():
     user = user_resp.json()
     discord_id = user.get("id")
     username = user.get("username", "unknown")
+    avatar_hash = user.get("avatar")
+    avatar_url = (
+        f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar_hash}.png"
+        if avatar_hash else "https://cdn.discordapp.com/embed/avatars/0.png"
+    )
 
-    if not STAFF_GUILD_ID:
-        return "Staff dashboard is not configured (missing STAFF_GUILD_ID).", 500
+    if not DASHBOARD_GUILD_ID:
+        return "Staff dashboard is not configured (missing DASHBOARD_GUILD_ID).", 500
 
     # Deferred import: staff_dashboard is imported by bot.py before `bot` is
     # constructed, so importing it at module load time would be circular.
     from bot import bot as bot_instance
 
-    guild = bot_instance.get_guild(int(STAFF_GUILD_ID))
+    guild = bot_instance.get_guild(int(DASHBOARD_GUILD_ID))
     if guild is None:
-        return "Bot is not currently in the configured staff guild.", 500
+        return "Bot is not currently in the configured Discord server.", 500
 
     try:
         future = asyncio.run_coroutine_threadsafe(guild.fetch_member(int(discord_id)), bot_instance.loop)
@@ -168,19 +307,15 @@ def callback():
         member = None
 
     if member is None:
-        return "You are not a member of the staff Discord server.", 403
+        return "You are not a member of the Discord server.", 403
 
-    is_staff = (
-        member.guild_permissions.administrator
-        or member.guild_permissions.manage_guild
-        or member.guild_permissions.moderate_members
-    )
-    if not is_staff:
-        return "Your Discord account doesn't have staff permissions in the server.", 403
+    permissions = _compute_permissions(member)
 
     session["staff_discord_id"] = discord_id
     session["staff_name"] = username
-    print(f"[StaffDashboard] {username} ({discord_id}) logged in")
+    session["staff_avatar"] = avatar_url
+    session["staff_permissions"] = sorted(permissions)
+    print(f"[StaffDashboard] {username} ({discord_id}) logged in with permissions: {sorted(permissions)}")
     return redirect("/staff/")
 
 
@@ -190,36 +325,120 @@ def logout():
     return redirect("/staff/login")
 
 
+# ── UI ───────────────────────────────────────────────────────────────────
+
+BASE_STYLE = """
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #12151c; --panel-border: #23283333;
+    --text: #e8eaee; --muted: #8b93a3; --accent: #4da3ff; --accent-dim: #1f4d7a;
+    --danger: #ff5c5c; --ok: #3ecf8e; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 28px; border-bottom: 1px solid var(--panel-border); background: var(--panel);
+  }
+  .topbar h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .topbar .who { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
+  .topbar img { width: 28px; height: 28px; border-radius: 50%; }
+  .topbar a { color: var(--muted); text-decoration: none; }
+  .topbar a:hover { color: var(--text); }
+  main { max-width: 780px; margin: 0 auto; padding: 28px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: var(--radius); padding: 20px 22px; margin-bottom: 18px;
+  }
+  .card h2 { margin: 0 0 4px; font-size: 15px; }
+  .card p.hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  input, select {
+    background: #0e1117; border: 1px solid var(--panel-border); color: var(--text);
+    border-radius: 7px; padding: 9px 11px; font-size: 14px; margin: 4px 6px 4px 0;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--accent-dim); color: #dceaff; border: 1px solid var(--accent);
+    border-radius: 7px; padding: 9px 16px; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: var(--accent); color: #06121f; }
+  button.danger { border-color: var(--danger); color: #ffd6d6; }
+  button.danger:hover { background: var(--danger); color: #250000; }
+  pre.output {
+    background: #05070a; border: 1px solid var(--panel-border); border-radius: 7px;
+    padding: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word;
+    margin-top: 12px; max-height: 260px; overflow: auto; color: #b9c2cf;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--panel-border); }
+  th { color: var(--muted); font-weight: 500; }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 30px; }
+  .checks label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; font-size: 13px; color: var(--muted); }
+</style>
+"""
+
+
+def _topbar():
+    name = html.escape(session.get("staff_name", "?"))
+    avatar = html.escape(session.get("staff_avatar", ""))
+    return f"""
+    <div class="topbar">
+      <h1>🚌 Busways Region | 7 — Control Panel</h1>
+      <div class="who">
+        <img src="{avatar}">
+        <span>{name}</span>
+        {'<a href="/staff/permissions">Permissions Manager</a>' if _has_permission(MANAGE_PERMISSIONS) else ''}
+        <a href="/staff/logout">Log out</a>
+      </div>
+    </div>
+    """
+
+
 DASHBOARD_HTML = """
-<html>
-<head><title>Busways Staff Control</title></head>
-<body style="background:#111;color:#eee;font-family:sans-serif;padding:40px;max-width:700px;margin:auto;">
-  <h1>Busways Region | 7 — Staff Control</h1>
-  <p>Logged in as <b>{{ name }}</b> — <a href="/staff/logout" style="color:#888;">log out</a></p>
-  <hr style="border-color:#333;">
+<html><head><title>Busways Staff Control</title>{{ style|safe }}</head>
+<body>
+{{ topbar|safe }}
+<main>
+  {% if not any_permission %}
+  <div class="card"><p class="empty">Your account has no dashboard permissions yet. Ask an admin to grant your role access in Permissions Manager.</p></div>
+  {% endif %}
 
-  <h2>Players</h2>
-  <button onclick="listPlayers()">Refresh player list</button>
-  <pre id="players" style="background:#000;padding:12px;border-radius:6px;white-space:pre-wrap;"></pre>
+  {% if can_list_players %}
+  <div class="card">
+    <h2>Players</h2>
+    <p class="hint">Live player list for the currently running server instance(s).</p>
+    <button onclick="listPlayers()">Refresh player list</button>
+    <pre class="output" id="players"></pre>
+  </div>
+  {% endif %}
 
-  <h2>Kick a player</h2>
-  <input id="kickName" placeholder="Player name">
-  <input id="kickReason" placeholder="Reason (optional)">
-  <button onclick="kickPlayer()">Kick</button>
-  <pre id="kickResult" style="background:#000;padding:12px;border-radius:6px;white-space:pre-wrap;"></pre>
+  {% if can_kick %}
+  <div class="card">
+    <h2>Kick a player</h2>
+    <p class="hint">Removes a player from the server instance they're currently in.</p>
+    <input id="kickName" placeholder="Player name">
+    <input id="kickReason" placeholder="Reason (optional)">
+    <button onclick="kickPlayer()">Kick</button>
+    <pre class="output" id="kickResult"></pre>
+  </div>
+  {% endif %}
 
-  <h2>Announce</h2>
-  <input id="announceMsg" placeholder="Message to broadcast" style="width:400px;">
-  <button onclick="announce()">Send</button>
-  <pre id="announceResult" style="background:#000;padding:12px;border-radius:6px;white-space:pre-wrap;"></pre>
-
+  {% if can_announce %}
+  <div class="card">
+    <h2>Announce</h2>
+    <p class="hint">Broadcasts a message to all connected clients.</p>
+    <input id="announceMsg" placeholder="Message to broadcast" style="width:70%;">
+    <button onclick="announce()">Send</button>
+    <pre class="output" id="announceResult"></pre>
+  </div>
+  {% endif %}
+</main>
 <script>
 async function call(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body || {}),
-  });
+  const res = await fetch(url, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {}) });
   return res.json();
 }
 async function listPlayers() {
@@ -238,22 +457,146 @@ async function announce() {
   document.getElementById("announceResult").textContent = JSON.stringify(await call("/staff/api/announce", {message}), null, 2);
 }
 </script>
-</body>
-</html>
+</body></html>
 """
 
 
 @staff_bp.route("/")
 def dashboard():
-    guard = _require_staff()
+    if not _is_logged_in():
+        return redirect("/staff/login")
+    can_list_players = _has_permission("list_players")
+    can_kick = _has_permission("kick_player")
+    can_announce = _has_permission("announce")
+    return render_template_string(
+        DASHBOARD_HTML,
+        style=BASE_STYLE,
+        topbar=_topbar(),
+        can_list_players=can_list_players,
+        can_kick=can_kick,
+        can_announce=can_announce,
+        any_permission=can_list_players or can_kick or can_announce,
+    )
+
+
+PERMISSIONS_HTML = """
+<html><head><title>Permissions Manager</title>{{ style|safe }}</head>
+<body>
+{{ topbar|safe }}
+<main>
+  <div class="card">
+    <h2>Grant a role permissions</h2>
+    <p class="hint">Anyone with Discord Administrator on this server always has every permission, regardless of what's set here.</p>
+    <select id="roleSelect">
+      {% for r in guild_roles %}<option value="{{ r.id }}" data-name="{{ r.name }}">{{ r.name }}</option>{% endfor %}
+    </select>
+    <div class="checks" style="margin-top:10px;">
+      {% for key, label in known_permissions.items() %}
+      <label><input type="checkbox" class="permCheck" value="{{ key }}"> {{ label }}</label>
+      {% endfor %}
+    </div>
+    <button style="margin-top:10px;" onclick="savePermissions()">Save</button>
+    <pre class="output" id="saveResult"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Current role permissions</h2>
+    <table>
+      <tr><th>Role</th><th>Permissions</th><th></th></tr>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.role_name }}</td>
+        <td>{{ row.permissions|join(", ") if row.permissions else "—" }}</td>
+        <td><button class="danger" onclick="deleteRole('{{ row.role_id }}')">Remove</button></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3" class="empty">No roles configured yet.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</main>
+<script>
+async function call(url, body) {
+  const res = await fetch(url, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {}) });
+  return res.json();
+}
+async function savePermissions() {
+  const sel = document.getElementById("roleSelect");
+  const roleId = sel.value;
+  const roleName = sel.options[sel.selectedIndex].dataset.name;
+  const perms = Array.from(document.querySelectorAll(".permCheck:checked")).map(c => c.value);
+  document.getElementById("saveResult").textContent = "Saving...";
+  const data = await call("/staff/api/permissions", {roleId, roleName, permissions: perms});
+  document.getElementById("saveResult").textContent = JSON.stringify(data, null, 2);
+  if (data.ok) setTimeout(() => location.reload(), 600);
+}
+async function deleteRole(roleId) {
+  await call("/staff/api/permissions/delete", {roleId});
+  location.reload();
+}
+</script>
+</body></html>
+"""
+
+
+@staff_bp.route("/permissions")
+def permissions_page():
+    guard = _require_permission(MANAGE_PERMISSIONS)
     if guard:
         return guard
-    return render_template_string(DASHBOARD_HTML, name=session.get("staff_name", "?"))
 
+    from bot import bot as bot_instance
+    guild = bot_instance.get_guild(int(DASHBOARD_GUILD_ID)) if DASHBOARD_GUILD_ID else None
+    guild_roles = sorted(
+        ({"id": r.id, "name": r.name} for r in guild.roles if not r.is_default()),
+        key=lambda r: r["name"].lower(),
+    ) if guild else []
+
+    return render_template_string(
+        PERMISSIONS_HTML,
+        style=BASE_STYLE,
+        topbar=_topbar(),
+        guild_roles=guild_roles,
+        known_permissions=KNOWN_PERMISSIONS,
+        rows=_permissions_read(),
+    )
+
+
+@staff_bp.route("/api/permissions", methods=["POST"])
+def api_permissions_save():
+    guard = _api_permission_guard(MANAGE_PERMISSIONS)
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    role_id = str(data.get("roleId", "")).strip()
+    role_name = str(data.get("roleName", "")).strip()
+    permissions = data.get("permissions") or []
+    if not role_id or not role_name:
+        return jsonify({"error": "roleId and roleName are required"}), 400
+    _permissions_upsert(role_id, role_name, permissions)
+    print(f"[StaffDashboard] {session.get('staff_name')} set permissions for role {role_name} ({role_id}): {permissions}")
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/permissions/delete", methods=["POST"])
+def api_permissions_delete():
+    guard = _api_permission_guard(MANAGE_PERMISSIONS)
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    role_id = str(data.get("roleId", "")).strip()
+    if not role_id:
+        return jsonify({"error": "roleId is required"}), 400
+    _permissions_delete(role_id)
+    print(f"[StaffDashboard] {session.get('staff_name')} removed permissions for role {role_id}")
+    return jsonify({"ok": True})
+
+
+# ── Game actions ─────────────────────────────────────────────────────────
 
 @staff_bp.route("/api/players", methods=["POST"])
 def api_players():
-    guard = _api_guard()
+    guard = _api_permission_guard("list_players")
     if guard:
         return guard
     try:
@@ -264,7 +607,7 @@ def api_players():
 
 @staff_bp.route("/api/kick", methods=["POST"])
 def api_kick():
-    guard = _api_guard()
+    guard = _api_permission_guard("kick_player")
     if guard:
         return guard
     data = request.get_json(force=True, silent=True) or {}
@@ -282,7 +625,7 @@ def api_kick():
 
 @staff_bp.route("/api/announce", methods=["POST"])
 def api_announce():
-    guard = _api_guard()
+    guard = _api_permission_guard("announce")
     if guard:
         return guard
     data = request.get_json(force=True, silent=True) or {}
