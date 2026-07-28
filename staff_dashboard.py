@@ -224,7 +224,7 @@ def _require_permission(action: str):
     if not _is_logged_in():
         return redirect("/staff/login")
     if not _has_permission(action):
-        return "You don't have permission to do that. Ask an admin to grant your role access in Permissions Manager.", 403
+        return _error_page(403, "No access", "You don't have permission to do that. Ask an admin to grant your role access in Permissions Manager.")
     return None
 
 
@@ -239,7 +239,7 @@ def _api_permission_guard(action: str):
 @staff_bp.route("/login")
 def login():
     if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
-        return "Staff dashboard is not configured (missing DISCORD_CLIENT_ID/DISCORD_CLIENT_SECRET).", 500
+        return _error_page(500, "Not configured", "Missing DISCORD_CLIENT_ID/DISCORD_CLIENT_SECRET on the server.")
     state = secrets.token_urlsafe(24)
     session["staff_oauth_state"] = state
     params = {
@@ -257,7 +257,7 @@ def callback():
     code = request.args.get("code")
     state = request.args.get("state")
     if not code or not state or state != session.pop("staff_oauth_state", None):
-        return "Invalid or expired login attempt. Go back and try /staff/login again.", 400
+        return _error_page(400, "Login expired", "That login attempt was invalid or expired. Go back and try logging in again.")
 
     token_resp = requests.post(
         f"{DISCORD_API}/oauth2/token",
@@ -273,7 +273,7 @@ def callback():
     )
     if not token_resp.ok:
         print(f"[StaffDashboard] Token exchange failed: {token_resp.status_code} {token_resp.text}")
-        return "Discord login failed (token exchange).", 502
+        return _error_page(502, "Login failed", "Discord login failed during token exchange. Try again.")
     access_token = token_resp.json().get("access_token")
 
     user_resp = requests.get(
@@ -282,7 +282,7 @@ def callback():
         timeout=10,
     )
     if not user_resp.ok:
-        return "Discord login failed (user fetch).", 502
+        return _error_page(502, "Login failed", "Discord login failed while fetching your account info. Try again.")
     user = user_resp.json()
     discord_id = user.get("id")
     username = user.get("username", "unknown")
@@ -293,7 +293,7 @@ def callback():
     )
 
     if not DASHBOARD_GUILD_ID:
-        return "Staff dashboard is not configured (missing DASHBOARD_GUILD_ID).", 500
+        return _error_page(500, "Not configured", "Missing DASHBOARD_GUILD_ID on the server.")
 
     # Deferred import: staff_dashboard is imported by bot.py before `bot` is
     # constructed, so importing it at module load time would be circular.
@@ -301,7 +301,7 @@ def callback():
 
     guild = bot_instance.get_guild(int(DASHBOARD_GUILD_ID))
     if guild is None:
-        return "Bot is not currently in the configured Discord server.", 500
+        return _error_page(500, "Bot offline", "The bot isn't currently connected to the configured Discord server. Try again in a minute.")
 
     try:
         future = asyncio.run_coroutine_threadsafe(guild.fetch_member(int(discord_id)), bot_instance.loop)
@@ -311,9 +311,15 @@ def callback():
         member = None
 
     if member is None:
-        return "You are not a member of the Discord server.", 403
+        return _error_page(403, "Not a member", "You are not a member of the Busways Discord server.")
 
     permissions = _compute_permissions(member)
+    if not permissions:
+        return _error_page(
+            403, "No access",
+            f"Signed in as <b>{html.escape(username)}</b>, but your roles don't have any dashboard "
+            "permissions yet. Ask an admin to grant your role access in Permissions Manager, then log in again.",
+        )
 
     session["staff_discord_id"] = discord_id
     session["staff_name"] = username
@@ -330,86 +336,178 @@ def logout():
 
 
 # ── UI ───────────────────────────────────────────────────────────────────
+# Styled to echo sites.google.com/view/bwr7r/home — white background, blue
+# accent, top nav with wordmark + links, card sections.
 
 BASE_STYLE = """
 <style>
   :root {
-    --bg: #0b0d12; --panel: #12151c; --panel-border: #23283333;
-    --text: #e8eaee; --muted: #8b93a3; --accent: #4da3ff; --accent-dim: #1f4d7a;
-    --danger: #ff5c5c; --ok: #3ecf8e; --radius: 10px;
+    --bg: #ffffff; --bg-alt: #f8f9fa; --border: #dadce0;
+    --text: #202124; --muted: #5f6368; --accent: #1a73e8; --accent-dark: #174ea6;
+    --danger: #d93025; --radius: 8px;
   }
   * { box-sizing: border-box; }
   body {
     background: var(--bg); color: var(--text); margin: 0;
-    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-family: "Google Sans", Roboto, -apple-system, "Segoe UI", sans-serif;
   }
-  .topbar {
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .nav {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 16px 28px; border-bottom: 1px solid var(--panel-border); background: var(--panel);
+    padding: 14px 32px; border-bottom: 1px solid var(--border); background: var(--bg);
   }
-  .topbar h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  .topbar .who { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted); }
-  .topbar img { width: 28px; height: 28px; border-radius: 50%; }
-  .topbar a { color: var(--muted); text-decoration: none; }
-  .topbar a:hover { color: var(--text); }
-  main { max-width: 780px; margin: 0 auto; padding: 28px; }
+  .nav .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 500; color: var(--text); }
+  .nav .links { display: flex; align-items: center; gap: 24px; font-size: 14px; }
+  .nav .links a { color: var(--muted); }
+  .nav .links a:hover { color: var(--text); text-decoration: none; }
+  .nav .who { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  .nav img.avatar { width: 26px; height: 26px; border-radius: 50%; }
+  .btn {
+    display: inline-block; background: var(--accent); color: #fff; border: none;
+    border-radius: 20px; padding: 9px 20px; font-size: 14px; font-weight: 500; cursor: pointer;
+  }
+  .btn:hover { background: var(--accent-dark); text-decoration: none; }
+  .btn.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+  .btn.secondary:hover { background: var(--bg-alt); }
+  .btn.danger { background: var(--danger); }
+  .btn.danger:hover { background: #a50e0e; }
+  .hero { background: var(--bg-alt); padding: 56px 32px; text-align: center; }
+  .hero h1 { font-size: 32px; margin: 0 0 10px; font-weight: 500; }
+  .hero p { color: var(--muted); font-size: 16px; margin: 0 0 24px; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 8px; }
   .card {
-    background: var(--panel); border: 1px solid var(--panel-border);
-    border-radius: var(--radius); padding: 20px 22px; margin-bottom: 18px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 24px; margin-bottom: 18px;
   }
-  .card h2 { margin: 0 0 4px; font-size: 15px; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; font-weight: 500; }
   .card p.hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
   input, select {
-    background: #0e1117; border: 1px solid var(--panel-border); color: var(--text);
-    border-radius: 7px; padding: 9px 11px; font-size: 14px; margin: 4px 6px 4px 0;
+    background: #fff; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 9px 11px; font-size: 14px; margin: 4px 6px 4px 0;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
-  button {
-    background: var(--accent-dim); color: #dceaff; border: 1px solid var(--accent);
-    border-radius: 7px; padding: 9px 16px; font-size: 14px; cursor: pointer;
+  button:not(.btn) {
+    background: var(--bg-alt); color: var(--accent-dark); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 16px; font-size: 14px; cursor: pointer;
   }
-  button:hover { background: var(--accent); color: #06121f; }
-  button.danger { border-color: var(--danger); color: #ffd6d6; }
-  button.danger:hover { background: var(--danger); color: #250000; }
+  button:not(.btn):hover { background: #eef2fc; }
+  button.danger { color: var(--danger); border-color: #f3c6c2; }
+  button.danger:hover { background: #fdecea; }
   pre.output {
-    background: #05070a; border: 1px solid var(--panel-border); border-radius: 7px;
+    background: var(--bg-alt); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word;
-    margin-top: 12px; max-height: 260px; overflow: auto; color: #b9c2cf;
+    margin-top: 12px; max-height: 260px; overflow: auto; color: #3c4043;
   }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--panel-border); }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
   .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 30px; }
   .checks label { display: inline-flex; align-items: center; gap: 6px; margin-right: 16px; font-size: 13px; color: var(--muted); }
+  .errorbox { max-width: 480px; margin: 80px auto; text-align: center; padding: 0 24px; }
+  .errorbox .code { font-size: 13px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+  .errorbox h1 { font-size: 24px; margin: 8px 0 14px; }
+  .errorbox p { color: var(--muted); font-size: 14px; line-height: 1.6; }
 </style>
 """
 
 
-def _topbar():
-    name = html.escape(session.get("staff_name", "?"))
-    avatar = html.escape(session.get("staff_avatar", ""))
+def _nav(active: str = ""):
+    def link(href, label, key):
+        cls = ' style="color:var(--text);font-weight:500;"' if key == active else ""
+        return f'<a href="{href}"{cls}>{label}</a>'
+
+    links = [link("/staff/", "Home", "home")]
+    if _is_logged_in():
+        links.append(link("/staff/drivers-info", "Drivers Info", "drivers"))
+        if _has_permission(MANAGE_PERMISSIONS):
+            links.append(link("/staff/permissions", "Permissions Manager", "permissions"))
+
+    if _is_logged_in():
+        name = html.escape(session.get("staff_name", "?"))
+        avatar = html.escape(session.get("staff_avatar", ""))
+        who = f'<img class="avatar" src="{avatar}"><span>{name}</span><a href="/staff/logout">Log out</a>'
+    else:
+        who = '<a class="btn" href="/staff/login">Login with Discord</a>'
+
     return f"""
-    <div class="topbar">
-      <h1>🚌 Busways Region | 7 — Control Panel</h1>
-      <div class="who">
-        <img src="{avatar}">
-        <span>{name}</span>
-        {'<a href="/staff/permissions">Permissions Manager</a>' if _has_permission(MANAGE_PERMISSIONS) else ''}
-        <a href="/staff/logout">Log out</a>
-      </div>
+    <div class="nav">
+      <div class="brand">🚌 Busways Region 7 Roblox</div>
+      <div class="links">{''.join(links)}</div>
+      <div class="who">{who}</div>
     </div>
     """
 
 
-DASHBOARD_HTML = """
-<html><head><title>Busways Staff Control</title>{{ style|safe }}</head>
-<body>
-{{ topbar|safe }}
-<main>
-  {% if not any_permission %}
-  <div class="card"><p class="empty">Your account has no dashboard permissions yet. Ask an admin to grant your role access in Permissions Manager.</p></div>
-  {% endif %}
+def _error_page(code: int, title: str, message: str):
+    body = f"""
+    <html><head><title>{title} — Busways</title>{BASE_STYLE}</head>
+    <body>
+    {_nav()}
+    <div class="errorbox">
+      <div class="code">Error {code}</div>
+      <h1>{html.escape(title)}</h1>
+      <p>{message}</p>
+      <p><a href="/staff/">Back to home</a></p>
+    </div>
+    </body></html>
+    """
+    return body, code
 
+
+LANDING_HTML = """
+<html><head><title>Busways Region 7 — Staff Portal</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<div class="hero">
+  <h1>Busways Region | 7 Staff Portal</h1>
+  <p>Manage drivers, routes, and live game operations — no more unguessable links.</p>
+  {% if not logged_in %}
+  <a class="btn" href="/staff/login">Login with Discord</a>
+  {% endif %}
+</div>
+<main>
+  {% if logged_in %}
+  <div class="grid">
+    {% if can_drivers %}
+    <div class="card">
+      <h2>Drivers Info</h2>
+      <p class="hint">Live player list, kicks, and announcements for the running server.</p>
+      <a class="btn secondary" href="/staff/drivers-info">Open</a>
+    </div>
+    {% endif %}
+    {% if can_manage_permissions %}
+    <div class="card">
+      <h2>Permissions Manager</h2>
+      <p class="hint">Grant Discord roles access to dashboard actions.</p>
+      <a class="btn secondary" href="/staff/permissions">Open</a>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</main>
+</body></html>
+"""
+
+
+@staff_bp.route("/")
+def landing():
+    return render_template_string(
+        LANDING_HTML,
+        style=BASE_STYLE,
+        nav=_nav("home"),
+        logged_in=_is_logged_in(),
+        can_drivers=_has_permission("list_players") or _has_permission("kick_player") or _has_permission("announce"),
+        can_manage_permissions=_has_permission(MANAGE_PERMISSIONS),
+    )
+
+
+DRIVERS_INFO_HTML = """
+<html><head><title>Drivers Info — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
   {% if can_list_players %}
   <div class="card">
     <h2>Players</h2>
@@ -465,28 +563,29 @@ async function announce() {
 """
 
 
-@staff_bp.route("/")
-def dashboard():
+@staff_bp.route("/drivers-info")
+def drivers_info():
     if not _is_logged_in():
         return redirect("/staff/login")
     can_list_players = _has_permission("list_players")
     can_kick = _has_permission("kick_player")
     can_announce = _has_permission("announce")
+    if not (can_list_players or can_kick or can_announce):
+        return _error_page(403, "No access", "Your account doesn't have permission to view Drivers Info. Ask an admin to grant your role access in Permissions Manager.")
     return render_template_string(
-        DASHBOARD_HTML,
+        DRIVERS_INFO_HTML,
         style=BASE_STYLE,
-        topbar=_topbar(),
+        nav=_nav("drivers"),
         can_list_players=can_list_players,
         can_kick=can_kick,
         can_announce=can_announce,
-        any_permission=can_list_players or can_kick or can_announce,
     )
 
 
 PERMISSIONS_HTML = """
 <html><head><title>Permissions Manager</title>{{ style|safe }}</head>
 <body>
-{{ topbar|safe }}
+{{ nav|safe }}
 <main>
   <div class="card">
     <h2>Grant a role permissions</h2>
@@ -559,7 +658,7 @@ def permissions_page():
     return render_template_string(
         PERMISSIONS_HTML,
         style=BASE_STYLE,
-        topbar=_topbar(),
+        nav=_nav("permissions"),
         guild_roles=guild_roles,
         known_permissions=KNOWN_PERMISSIONS,
         rows=_permissions_read(),
