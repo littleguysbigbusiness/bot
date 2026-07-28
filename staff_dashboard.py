@@ -69,7 +69,8 @@ def _publish_action(action: str, params: dict = None) -> str:
         json={"topic": MESSAGING_TOPIC, "message": json.dumps(message)},
         timeout=10,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"publishMessage failed (HTTP {resp.status_code}): {resp.text}")
     return command_id
 
 
@@ -82,7 +83,8 @@ def _get_result(command_id: str):
     )
     if resp.status_code == 404:
         return None
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"GetEntry failed (HTTP {resp.status_code}): {resp.text}")
     return resp.json()
 
 
