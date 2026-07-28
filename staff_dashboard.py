@@ -461,57 +461,177 @@ def _error_page(code: int, title: str, message: str):
     return body, code
 
 
-GOOGLE_SITE_BASE = "https://sites.google.com/view/bwr7r"
 DISCORD_INVITE = "https://discord.gg/Bhwj8MPZ"
+
+# Content below is copied from sites.google.com/view/bwr7r/* (Home, Careers,
+# Customer Info, About Us, Drivers Info) so this site is a real replacement,
+# not a set of links back out to Google Sites.
+
+
+def _public_nav(active: str = ""):
+    def link(href, label, key):
+        style = ' style="color:#fff;font-weight:600;"' if key == active else ""
+        return f'<a href="{href}"{style}>{label}</a>'
+
+    links = [
+        link("/", "Home", "home"),
+        link("/careers", "Careers", "careers"),
+        link("/drivers-info", "Drivers Info", "drivers"),
+        link("/customer-info", "Customer Info", "customer"),
+        link("/about-us", "About Us", "about"),
+    ]
+    return f"""
+    <div class="nav">
+      <a href="/" class="brand" style="text-decoration:none;">🚌 Busways Region 7 Roblox</a>
+      <div class="links">{''.join(links)}</div>
+      <div class="who"><a class="btn" href="/staff/">Staff Portal</a></div>
+    </div>
+    """
+
+
+def _public_footer():
+    return f"""
+    <div class="nav" style="justify-content:center;font-size:13px;flex-direction:column;gap:6px;padding:24px;">
+      <div><a href="/about-us" style="color:#fff;">Our company</a> &middot; <a href="{DISCORD_INVITE}" style="color:#fff;">Our networks</a> &middot; <a href="/careers" style="color:#fff;">Careers</a></div>
+      <div style="opacity:0.85;">Join us on Discord: <a href="{DISCORD_INVITE}" style="color:#fff;text-decoration:underline;">{DISCORD_INVITE}</a></div>
+    </div>
+    """
+
 
 PUBLIC_HOME_HTML = """
 <html><head><title>Busways Region 7 Roblox</title>{{ style|safe }}</head>
 <body>
 {{ nav|safe }}
 <div class="hero">
-  <h1>Connecting people, communities, and journeys</h1>
-  <p>Busways Region | 7 — a Roblox bus transit experience.</p>
-  <a class="btn" href="{{ site_base }}/careers">Become a Driver</a>
+  <h1>Over 6 Weeks of Connecting people, communities and journeys</h1>
+  <a class="btn secondary" href="/about-us">About Us</a>
 </div>
 <main>
+  <div class="card">
+    <h2>Become a Driver at Busways</h2>
+    <p class="hint">Check out all our current opportunities and apply today!</p>
+    <a class="btn" href="/careers">Opportunities</a>
+  </div>
+
+  <div class="card">
+    <h2>The latest at Busways</h2>
+    <p><b>Ryde Buses Now Under Testing</b></p>
+    <p class="hint">New Managers have been hired. Managers: Unclebob (Bus Driver), Supergoodhelp (Bus Driver), Mr.Eual (Bus Marshal) and Levitty (Bus Marshal).</p>
+  </div>
+
   <div class="grid">
-    <div class="card">
-      <h2>Careers</h2>
-      <p class="hint">Current opportunities to join the team.</p>
-      <a class="btn secondary" href="{{ site_base }}/careers">View openings</a>
-    </div>
-    <div class="card">
-      <h2>Customer Info</h2>
-      <p class="hint">Routes, fares, and rider information.</p>
-      <a class="btn secondary" href="{{ site_base }}/customer-info">View info</a>
-    </div>
-    <div class="card">
-      <h2>About Us</h2>
-      <p class="hint">Who we are and how Busways runs.</p>
-      <a class="btn secondary" href="{{ site_base }}/about-us">Learn more</a>
-    </div>
-    <div class="card">
-      <h2>Staff Portal</h2>
-      <p class="hint">Live game operations for staff — Discord login required.</p>
-      <a class="btn secondary" href="/staff/">Open</a>
-    </div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">0</h2><p class="hint">Passenger journeys</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">8</h2><p class="hint">Buses in fleet</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">8</h2><p class="hint">Employees at Busways</p></div>
+    <div class="card" style="text-align:center;"><h2 style="color:var(--primary);font-size:22px;">2</h2><p class="hint">Depots owned by Busways</p></div>
+  </div>
+
+  <div class="card">
+    <h2>Our People</h2>
+    <p><b>Awesomebuilderaiden</b> — CEO</p>
+    <p class="hint">"I love Busways because I get to drive buses and work on the game. I am certain you will enjoy it."</p>
+    <p style="margin-top:14px;"><b>Unclebob119</b> — Bus Driver Manager</p>
+    <p class="hint">"Being able to empower our staff with the tools and support they need to do their best is the thing I enjoy the most. Every day provides an opportunity to learn."</p>
   </div>
 </main>
-<div class="nav" style="justify-content:center;font-size:13px;">
-  <span>Join us on Discord: <a href="{{ discord_invite }}" style="color:#fff;text-decoration:underline;">{{ discord_invite }}</a></span>
-</div>
+{{ footer|safe }}
 </body></html>
 """
 
 
 def render_public_home():
-    return render_template_string(
-        PUBLIC_HOME_HTML,
-        style=BASE_STYLE,
-        nav=_nav("home"),
-        site_base=GOOGLE_SITE_BASE,
-        discord_invite=DISCORD_INVITE,
-    )
+    return render_template_string(PUBLIC_HOME_HTML, style=BASE_STYLE, nav=_public_nav("home"), footer=_public_footer())
+
+
+CAREERS_HTML = """
+<html><head><title>Careers — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>Careers</h2>
+    <p><b>Bus Driver Applications Status: Closed</b></p>
+    <p class="hint">To apply, join the game or go to the Google Form to apply.</p>
+  </div>
+</main>
+{{ footer|safe }}
+</body></html>
+"""
+
+
+def render_careers():
+    return render_template_string(CAREERS_HTML, style=BASE_STYLE, nav=_public_nav("careers"), footer=_public_footer())
+
+
+CUSTOMER_INFO_HTML = """
+<html><head><title>Customer Info — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>Customer Info</h2>
+    <p class="hint">More info in our Discord.</p>
+    <a class="btn secondary" href="{{ discord }}">Busways Discord</a>
+  </div>
+</main>
+{{ footer|safe }}
+</body></html>
+"""
+
+
+def render_customer_info():
+    return render_template_string(CUSTOMER_INFO_HTML, style=BASE_STYLE, nav=_public_nav("customer"), footer=_public_footer(), discord=DISCORD_INVITE)
+
+
+ABOUT_US_HTML = """
+<html><head><title>About Us — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>About Us</h2>
+    <p>Hey! We're the team behind Busways Roblox, a group of people who really love buses, cities, and creating cool stuff together on Roblox.</p>
+    <p>Busways started as a fun little project between friends. We wanted to make something that felt real, where you could drive around, explore detailed cities, and experience what it's like to run proper bus routes. We had no idea it would grow into such an awesome community.</p>
+    <p>Now, Busways is more than just a game. It's a place where people meet, drive, roleplay, and just have a good time. Every update and new feature comes from our team's passion and your amazing feedback.</p>
+    <p>We're always learning, improving, and trying to make Busways the best it can be. But what really makes it special is all of you, the players who make the game come alive.</p>
+    <p>So from all of us, thank you for being part of the journey.<br>See you out on the road! 🚌🧡🤍</p>
+  </div>
+  <div class="card">
+    <h2>Our expertise</h2>
+    <p class="hint">Busways Roblox is a transport solution provider that partners with other Roblox agencies to bring innovative, reliable and flexible services to the Roblox community. We're unencumbered, flexible and fast with a leadership team that is both forward thinking and responsive to the changing nature of the domestic transport industry.</p>
+    <ul>
+      <li>Public transport</li><li>Bus charters</li><li>Customer experience</li>
+      <li>School buses</li><li>Network planning</li><li>Scheduling</li><li>Asset management</li>
+    </ul>
+  </div>
+</main>
+{{ footer|safe }}
+</body></html>
+"""
+
+
+def render_about_us():
+    return render_template_string(ABOUT_US_HTML, style=BASE_STYLE, nav=_public_nav("about"), footer=_public_footer())
+
+
+DRIVERS_INFO_PUBLIC_HTML = """
+<html><head><title>Drivers Info — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>Drivers Info</h2>
+    <h2 style="font-size:14px;color:var(--muted);font-weight:400;">Our Routes</h2>
+    <p class="hint">Route info coming soon. Staff should use the <a href="/staff/drivers-info">Staff Portal</a> for live operations.</p>
+  </div>
+</main>
+{{ footer|safe }}
+</body></html>
+"""
+
+
+def render_drivers_info_public():
+    return render_template_string(DRIVERS_INFO_PUBLIC_HTML, style=BASE_STYLE, nav=_public_nav("drivers"), footer=_public_footer())
 
 
 LANDING_HTML = """

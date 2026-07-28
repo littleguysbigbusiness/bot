@@ -19,7 +19,14 @@ from google.auth.transport.requests import Request
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
-from staff_dashboard import staff_bp, render_public_home
+from staff_dashboard import (
+    staff_bp,
+    render_public_home,
+    render_careers,
+    render_customer_info,
+    render_about_us,
+    render_drivers_info_public,
+)
 app.register_blueprint(staff_bp)
 
 # ── Sheet-backed Pending Verifications ────────────────────────────────────────
@@ -131,6 +138,22 @@ def is_already_verified(user_id: int) -> bool:
 @app.route('/')
 def home():
     return render_public_home()
+
+@app.route('/careers')
+def careers_page():
+    return render_careers()
+
+@app.route('/customer-info')
+def customer_info_page():
+    return render_customer_info()
+
+@app.route('/about-us')
+def about_us_page():
+    return render_about_us()
+
+@app.route('/drivers-info')
+def drivers_info_public_page():
+    return render_drivers_info_public()
 
 @app.route('/callback', methods=['GET'])
 def callback():
