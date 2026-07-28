@@ -816,6 +816,41 @@ def get_violations_for_person(discord_user_id: str) -> list:
     return list(reversed(out))
 
 
+# — Certifications: badges independent of any department's promotion ladder —
+
+CERTIFICATIONS_SHEET = "Certifications"
+CERTIFICATIONS_HEADERS = ["CertID", "DiscordUserID", "Name", "IssuedBy", "IssuedAt"]
+
+
+def list_certifications(discord_user_id=None) -> list:
+    rows = _sheet_read_all(CERTIFICATIONS_SHEET, CERTIFICATIONS_HEADERS)
+    if discord_user_id:
+        rows = [r for r in rows if r["DiscordUserID"] == str(discord_user_id)]
+    return list(reversed(rows))
+
+
+def add_certification(discord_user_id: str, name: str, issued_by: str) -> str:
+    cert_id = uuid.uuid4().hex[:10]
+    record = {
+        "CertID": cert_id,
+        "DiscordUserID": str(discord_user_id),
+        "Name": name,
+        "IssuedBy": issued_by,
+        "IssuedAt": datetime.datetime.utcnow().isoformat(),
+    }
+    _sheet_append_row(CERTIFICATIONS_SHEET, CERTIFICATIONS_HEADERS, record)
+    return cert_id
+
+
+def delete_certification(cert_id: str):
+    _sheet_delete_row_by_key(CERTIFICATIONS_SHEET, CERTIFICATIONS_HEADERS, "CertID", cert_id)
+
+
+def list_clock_sessions_for_user(discord_user_id: str) -> list:
+    rows = [r for r in _sheet_read_all(CLOCK_SESSIONS_SHEET, CLOCK_SESSIONS_HEADERS) if r["DiscordUserID"] == str(discord_user_id)]
+    return list(reversed(rows))
+
+
 # — Discord role sync on promotion approval —
 
 def sync_discord_role(discord_user_id: str, old_role_id: str, new_role_id: str):
@@ -2497,6 +2532,37 @@ function renderResult(data) {
   }
   html += `</div>`;
 
+  html += `<div class="card"><h2>Certifications</h2>
+    <input id="newCertName" placeholder="Certification name" style="width:60%;">
+    <button onclick="addCert()">Add</button>
+    <pre class="output" id="certResult"></pre>
+    <table style="margin-top:10px;"><tr><th>Name</th><th>Issued</th><th>By</th><th></th></tr>`;
+  if (data.certifications.length === 0) {
+    html += `<tr><td colspan="4" class="empty">No certifications yet.</td></tr>`;
+  }
+  for (const c of data.certifications) {
+    html += `<tr><td>${escapeHtml(c.Name)}</td><td>${escapeHtml((c.IssuedAt || "").slice(0, 10))}</td><td>${escapeHtml(c.IssuedBy)}</td><td><button class="danger" data-cert="${c.CertID}" onclick="deleteCert(this.dataset.cert)">Remove</button></td></tr>`;
+  }
+  html += `</table></div>`;
+
+  html += `<div class="card"><h2>Leave of absence history</h2><table><tr><th>Start</th><th>End</th><th>Reason</th><th>Status</th></tr>`;
+  if (data.loaHistory.length === 0) {
+    html += `<tr><td colspan="4" class="empty">No LOA history.</td></tr>`;
+  }
+  for (const l of data.loaHistory) {
+    html += `<tr><td>${escapeHtml(l.StartDate)}</td><td>${escapeHtml(l.EndDate)}</td><td>${escapeHtml(l.Reason)}</td><td>${escapeHtml(l.Status)}</td></tr>`;
+  }
+  html += `</table></div>`;
+
+  html += `<div class="card"><h2>Clock-in history</h2><table><tr><th>Department</th><th>Clock in</th><th>Clock out</th><th>Minutes</th><th>Verified</th></tr>`;
+  if (data.clockHistory.length === 0) {
+    html += `<tr><td colspan="5" class="empty">No clock-in history.</td></tr>`;
+  }
+  for (const s of data.clockHistory) {
+    html += `<tr><td>${escapeHtml(s.DeptID)}</td><td>${escapeHtml((s.ClockInAt || "").slice(0, 16))}</td><td>${escapeHtml((s.ClockOutAt || "").slice(0, 16)) || "Active"}</td><td>${escapeHtml(s.DurationMinutes)}</td><td>${s.VerifiedInGame === "true" ? "Yes" : "No"}</td></tr>`;
+  }
+  html += `</table></div>`;
+
   html += `<div class="card"><h2>Violations</h2><table><tr><th>When</th><th>Type</th><th>Reason</th><th>By</th><th>Status</th></tr>`;
   if (data.violations.length === 0) {
     html += `<tr><td colspan="5" class="empty">No violations on record.</td></tr>`;
@@ -2535,6 +2601,22 @@ async function addNote() {
   } else {
     document.getElementById("noteResult").textContent = JSON.stringify(data, null, 2);
   }
+}
+
+async function addCert() {
+  const name = document.getElementById("newCertName").value;
+  if (!name.trim()) return;
+  const data = await call("/staff/api/database/certifications/add", {discordUserId: currentLookupId, name});
+  if (data.ok) {
+    lookup();
+  } else {
+    document.getElementById("certResult").textContent = JSON.stringify(data, null, 2);
+  }
+}
+
+async function deleteCert(certId) {
+  await call("/staff/api/database/certifications/delete", {certId});
+  lookup();
 }
 </script>
 </body></html>
@@ -2585,6 +2667,9 @@ def api_database_lookup():
         "departments": departments,
         "violations": get_violations_for_person(discord_user_id),
         "notes": list_player_notes(discord_user_id),
+        "certifications": list_certifications(discord_user_id),
+        "loaHistory": list_loa(discord_user_id=discord_user_id),
+        "clockHistory": list_clock_sessions_for_user(discord_user_id)[:20],
     })
 
 
@@ -2614,6 +2699,33 @@ def api_database_add_note():
         return jsonify({"error": "discordUserId and note are required"}), 400
     note_id = add_player_note(discord_user_id, note, session.get("staff_name", ""))
     return jsonify({"ok": True, "noteId": note_id})
+
+
+@staff_bp.route("/api/database/certifications/add", methods=["POST"])
+def api_database_add_cert():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    discord_user_id = str(data.get("discordUserId", "")).strip()
+    name = str(data.get("name", "")).strip()[:150]
+    if not discord_user_id or not name:
+        return jsonify({"error": "discordUserId and name are required"}), 400
+    cert_id = add_certification(discord_user_id, name, session.get("staff_name", ""))
+    return jsonify({"ok": True, "certId": cert_id})
+
+
+@staff_bp.route("/api/database/certifications/delete", methods=["POST"])
+def api_database_delete_cert():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    cert_id = str(data.get("certId", "")).strip()
+    if not cert_id:
+        return jsonify({"error": "certId is required"}), 400
+    delete_certification(cert_id)
+    return jsonify({"ok": True})
 
 
 PERMISSIONS_HTML = """
