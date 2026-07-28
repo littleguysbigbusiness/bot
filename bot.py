@@ -17,6 +17,10 @@ from google.auth.transport.requests import Request
 
 # ── Flask Initialization ────────────────────────────────────────────────────────
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+
+from staff_dashboard import staff_bp
+app.register_blueprint(staff_bp)
 
 # ── Sheet-backed Pending Verifications ────────────────────────────────────────
 # Uses the TempStates sheet (columns: A=token, B=discord_id) instead of
