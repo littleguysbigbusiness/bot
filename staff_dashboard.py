@@ -1020,7 +1020,7 @@ def _nav(active: str = ""):
 
     links = [link("/staff/", "Home", "home")]
     if _is_logged_in():
-        links.append(link("/staff/drivers-info", "Drivers Info", "drivers"))
+        links.append(link("/staff/remote-server-management", "Remote Server Management", "rsm"))
         links.append(link("/staff/my-departments", "My Departments", "my-departments"))
         if _has_permission("manage_site"):
             links.append(link("/staff/site-management", "Site Management", "site"))
@@ -1229,7 +1229,7 @@ DRIVERS_INFO_PUBLIC_HTML = """
   <div class="card">
     <h2>Drivers Info</h2>
     <h2 style="font-size:14px;color:var(--muted);font-weight:400;">Our Routes</h2>
-    <p class="hint">Route info coming soon. Staff should use the <a href="/staff/drivers-info">Staff Portal</a> for live operations.</p>
+    <p class="hint">Route info coming soon. Staff should use the <a href="/staff/remote-server-management">Staff Portal</a> for live operations.</p>
   </div>
 </main>
 {{ footer|safe }}
@@ -1257,9 +1257,9 @@ LANDING_HTML = """
   <div class="grid">
     {% if can_drivers %}
     <div class="card">
-      <h2>Drivers Info</h2>
+      <h2>Remote Server Management</h2>
       <p class="hint">Live player list, kicks, and announcements for the running server.</p>
-      <a class="btn secondary" href="/staff/drivers-info">Open</a>
+      <a class="btn secondary" href="/staff/remote-server-management">Open</a>
     </div>
     {% endif %}
     <div class="card">
@@ -1309,8 +1309,8 @@ def landing():
     )
 
 
-DRIVERS_INFO_HTML = """
-<html><head><title>Drivers Info — Busways</title>{{ style|safe }}</head>
+REMOTE_SERVER_MANAGEMENT_HTML = """
+<html><head><title>Remote Server Management — Busways</title>{{ style|safe }}</head>
 <body>
 {{ nav|safe }}
 <main>
@@ -1369,19 +1369,19 @@ async function announce() {
 """
 
 
-@staff_bp.route("/drivers-info")
-def drivers_info():
+@staff_bp.route("/remote-server-management")
+def remote_server_management():
     if not _is_logged_in():
         return redirect("/staff/login")
     can_list_players = _has_permission("list_players")
     can_kick = _has_permission("kick_player")
     can_announce = _has_permission("announce")
     if not (can_list_players or can_kick or can_announce):
-        return _error_page(403, "No access", "Your account doesn't have permission to view Drivers Info. Ask an admin to grant your role access in Permissions Manager.")
+        return _error_page(403, "No access", "Your account doesn't have permission to view Remote Server Management. Ask an admin to grant your role access in Permissions Manager.")
     return render_template_string(
-        DRIVERS_INFO_HTML,
+        REMOTE_SERVER_MANAGEMENT_HTML,
         style=BASE_STYLE,
-        nav=_nav("drivers"),
+        nav=_nav("rsm"),
         can_list_players=can_list_players,
         can_kick=can_kick,
         can_announce=can_announce,
@@ -1674,9 +1674,10 @@ DEPARTMENTS_ADMIN_HTML = """
 
   <div class="card">
     <h2>Staff profile lookup</h2>
+    <p class="hint">Look up any staff member's departments and training checklists, and check off items directly here.</p>
     <input id="lookupId" placeholder="Discord user ID">
     <button onclick="lookupProfile()">Look up</button>
-    <pre class="output" id="lookupResult"></pre>
+    <div id="lookupResult"></div>
   </div>
 
   <div class="card">
@@ -1787,11 +1788,41 @@ async function forceClockOut(sessionId) {
   location.reload();
 }
 
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 async function lookupProfile() {
   const discordUserId = document.getElementById("lookupId").value;
-  document.getElementById("lookupResult").textContent = "Looking up...";
+  const container = document.getElementById("lookupResult");
+  container.innerHTML = '<pre class="output">Looking up...</pre>';
   const data = await call("/staff/api/profile-lookup", {discordUserId});
-  document.getElementById("lookupResult").textContent = JSON.stringify(data, null, 2);
+
+  if (data.error) {
+    container.innerHTML = `<pre class="output">${escapeHtml(JSON.stringify(data))}</pre>`;
+    return;
+  }
+  if (!data.departments || data.departments.length === 0) {
+    container.innerHTML = `<pre class="output">${escapeHtml(data.username || discordUserId)} is not a member of any department.</pre>`;
+    return;
+  }
+
+  let html = `<p style="margin-top:12px;"><b>${escapeHtml(data.username || discordUserId)}</b></p>`;
+  for (const dep of data.departments) {
+    html += `<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:10px;">
+      <p><b>${escapeHtml(dep.department)}</b> — ${dep.daysIn}/${dep.minDays} days in department`
+      + (dep.nextDept ? ` &middot; next: ${escapeHtml(dep.nextDept)}` : "") + `</p>`;
+    for (const item of dep.checklistItems) {
+      const checked = dep.checklistProgress[item] ? "checked" : "";
+      html += `<label style="display:block;"><input type="checkbox" data-membership="${dep.membershipId}" data-item="${escapeHtml(item)}" onchange="toggleChecklist(this.dataset.membership, this.dataset.item, this.checked)" ${checked}> ${escapeHtml(item)}</label>`;
+    }
+    if (!dep.eligibleForPromotion && dep.reasons.length) {
+      html += `<p class="hint">Not yet eligible: ${escapeHtml(dep.reasons.join(", "))}</p>`;
+    }
+    html += `</div>`;
+  }
+  container.innerHTML = html;
 }
 </script>
 </body></html>
@@ -2003,6 +2034,7 @@ def api_profile_lookup():
 
     memberships = list_department_members(discord_user_id=discord_user_id)
     departments_by_id = {d["DeptID"]: d for d in list_departments()}
+    username = memberships[0]["Username"] if memberships else ""
     profile = []
     for m in memberships:
         dept = departments_by_id.get(m["DeptID"])
@@ -2010,8 +2042,13 @@ def api_profile_lookup():
             continue
         elig = get_promotion_eligibility(m, dept)
         profile.append({
+            "membershipId": m["MembershipID"],
+            "deptId": dept["DeptID"],
             "department": dept["Name"],
             "joinedDeptDate": m["JoinedDeptDate"],
+            "daysIn": elig["days_in"],
+            "minDays": elig["min_days"],
+            "checklistItems": dept.get("ChecklistItemsList", []),
             "checklistProgress": m["ChecklistProgressDict"],
             "eligibleForPromotion": elig["eligible"],
             "reasons": elig["reasons"],
@@ -2020,6 +2057,7 @@ def api_profile_lookup():
 
     return jsonify({
         "discordUserId": discord_user_id,
+        "username": username,
         "departments": profile,
         "loaHistory": list_loa(discord_user_id=discord_user_id),
     })
