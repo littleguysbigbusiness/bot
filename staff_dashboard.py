@@ -52,8 +52,12 @@ KNOWN_PERMISSIONS = {
     "list_players": "View player list",
     "kick_player": "Kick a player",
     "announce": "Send an announcement",
+    "whisper_player": "Send a private message to a player",
+    "teleport_player": "Teleport a player",
+    "freeze_player": "Freeze/unfreeze a player",
     "manage_site": "Edit site content (Home/Careers text)",
     "manage_departments": "Manage departments, members, promotions, and LOA",
+    "view_database": "Look up player/staff records, notes, and training",
 }
 # Reserved: never grantable via the roles sheet, only ever held by a true
 # Discord Administrator on the guild. Prevents the permission system from
@@ -759,6 +763,59 @@ def is_user_in_game(roblox_user_id: str) -> bool:
         return False
 
 
+# — Database page: player notes + violations lookup (reuses bot.py's Violations sheet) —
+
+PLAYER_NOTES_SHEET = "PlayerNotes"
+PLAYER_NOTES_HEADERS = ["NoteID", "DiscordUserID", "Note", "AddedBy", "AddedAt"]
+
+
+def list_player_notes(discord_user_id=None) -> list:
+    rows = _sheet_read_all(PLAYER_NOTES_SHEET, PLAYER_NOTES_HEADERS)
+    if discord_user_id:
+        rows = [r for r in rows if r["DiscordUserID"] == str(discord_user_id)]
+    return list(reversed(rows))
+
+
+def add_player_note(discord_user_id: str, note: str, added_by: str) -> str:
+    note_id = uuid.uuid4().hex[:10]
+    record = {
+        "NoteID": note_id,
+        "DiscordUserID": str(discord_user_id),
+        "Note": note,
+        "AddedBy": added_by,
+        "AddedAt": datetime.datetime.utcnow().isoformat(),
+    }
+    _sheet_append_row(PLAYER_NOTES_SHEET, PLAYER_NOTES_HEADERS, record)
+    return note_id
+
+
+def get_violations_for_person(discord_user_id: str) -> list:
+    """Matches Violations rows keyed by the given Discord ID, or by their linked
+    Roblox user ID (covers entries logged from the in-game moderation panel)."""
+    from bot import read_all_rows, pad, COL_USER_ID, COL_ISSUED_BY, COL_REASON, COL_TIMESTAMP, COL_INCIDENT_ID, COL_REVOKED, COL_RESTRICTION, COL_SOURCE, COL_END_DATE
+
+    roblox_id = get_roblox_user_id_for_discord(discord_user_id)
+    match_ids = {str(discord_user_id).strip()}
+    if roblox_id:
+        match_ids.add(str(roblox_id).strip())
+
+    out = []
+    for raw in read_all_rows():
+        row = pad(raw)
+        if row[COL_USER_ID].strip() in match_ids:
+            out.append({
+                "incidentId": row[COL_INCIDENT_ID],
+                "restriction": row[COL_RESTRICTION],
+                "reason": row[COL_REASON],
+                "issuedBy": row[COL_ISSUED_BY],
+                "timestamp": row[COL_TIMESTAMP],
+                "revoked": row[COL_REVOKED].strip().upper() == "TRUE",
+                "source": row[COL_SOURCE],
+                "endDate": row[COL_END_DATE],
+            })
+    return list(reversed(out))
+
+
 # — Discord role sync on promotion approval —
 
 def sync_discord_role(discord_user_id: str, old_role_id: str, new_role_id: str):
@@ -1026,6 +1083,8 @@ def _nav(active: str = ""):
             links.append(link("/staff/site-management", "Site Management", "site"))
         if _has_permission("manage_departments"):
             links.append(link("/staff/departments", "Departments", "departments"))
+        if _has_permission("view_database"):
+            links.append(link("/staff/database", "Database", "database"))
         if _has_permission(MANAGE_PERMISSIONS):
             links.append(link("/staff/permissions", "Permissions Manager", "permissions"))
 
@@ -1274,6 +1333,13 @@ LANDING_HTML = """
       <a class="btn secondary" href="/staff/departments">Open</a>
     </div>
     {% endif %}
+    {% if can_view_database %}
+    <div class="card">
+      <h2>Database</h2>
+      <p class="hint">Look up a person: training, violations, and notes.</p>
+      <a class="btn secondary" href="/staff/database">Open</a>
+    </div>
+    {% endif %}
     {% if can_manage_site %}
     <div class="card">
       <h2>Site Management</h2>
@@ -1302,9 +1368,12 @@ def landing():
         style=BASE_STYLE,
         nav=_nav("home"),
         logged_in=_is_logged_in(),
-        can_drivers=_has_permission("list_players") or _has_permission("kick_player") or _has_permission("announce"),
+        can_drivers=any(
+            _has_permission(p) for p in ("list_players", "kick_player", "announce", "whisper_player", "teleport_player", "freeze_player")
+        ),
         can_manage_site=_has_permission("manage_site"),
         can_manage_departments=_has_permission("manage_departments"),
+        can_view_database=_has_permission("view_database"),
         can_manage_permissions=_has_permission(MANAGE_PERMISSIONS),
     )
 
@@ -1337,10 +1406,47 @@ REMOTE_SERVER_MANAGEMENT_HTML = """
   {% if can_announce %}
   <div class="card">
     <h2>Announce</h2>
-    <p class="hint">Broadcasts a message to all connected clients.</p>
+    <p class="hint">Pops up on every connected client's screen.</p>
     <input id="announceMsg" placeholder="Message to broadcast" style="width:70%;">
     <button onclick="announce()">Send</button>
     <pre class="output" id="announceResult"></pre>
+  </div>
+  {% endif %}
+
+  {% if can_whisper %}
+  <div class="card">
+    <h2>Private message</h2>
+    <p class="hint">Pops up only on the target player's screen.</p>
+    <input id="whisperName" placeholder="Player name">
+    <input id="whisperMsg" placeholder="Message" style="width:50%;">
+    <button onclick="whisperPlayer()">Send</button>
+    <pre class="output" id="whisperResult"></pre>
+  </div>
+  {% endif %}
+
+  {% if can_teleport %}
+  <div class="card">
+    <h2>Teleport</h2>
+    <p class="hint">Teleport a player to another player, or to exact coordinates.</p>
+    <input id="tpName" placeholder="Player name">
+    <input id="tpToPlayer" placeholder="To player (optional)">
+    <input id="tpX" type="number" placeholder="X" style="width:80px;">
+    <input id="tpY" type="number" placeholder="Y" style="width:80px;">
+    <input id="tpZ" type="number" placeholder="Z" style="width:80px;">
+    <button onclick="teleportPlayer()">Teleport</button>
+    <p class="hint">Fill in "To player" OR all three of X/Y/Z, not both.</p>
+    <pre class="output" id="tpResult"></pre>
+  </div>
+  {% endif %}
+
+  {% if can_freeze %}
+  <div class="card">
+    <h2>Freeze player</h2>
+    <p class="hint">Anchors the player in place and zeroes their walk/jump.</p>
+    <input id="freezeName" placeholder="Player name">
+    <button onclick="freezePlayer(true)">Freeze</button>
+    <button onclick="freezePlayer(false)">Unfreeze</button>
+    <pre class="output" id="freezeResult"></pre>
   </div>
   {% endif %}
 </main>
@@ -1364,6 +1470,27 @@ async function announce() {
   document.getElementById("announceResult").textContent = "Working...";
   document.getElementById("announceResult").textContent = JSON.stringify(await call("/staff/api/announce", {message}), null, 2);
 }
+async function whisperPlayer() {
+  const player = document.getElementById("whisperName").value;
+  const message = document.getElementById("whisperMsg").value;
+  document.getElementById("whisperResult").textContent = "Working...";
+  document.getElementById("whisperResult").textContent = JSON.stringify(await call("/staff/api/whisper", {player, message}), null, 2);
+}
+async function teleportPlayer() {
+  const player = document.getElementById("tpName").value;
+  const toPlayer = document.getElementById("tpToPlayer").value;
+  const x = document.getElementById("tpX").value;
+  const y = document.getElementById("tpY").value;
+  const z = document.getElementById("tpZ").value;
+  document.getElementById("tpResult").textContent = "Working...";
+  const body = toPlayer ? {player, toPlayer} : {player, x: Number(x), y: Number(y), z: Number(z)};
+  document.getElementById("tpResult").textContent = JSON.stringify(await call("/staff/api/teleport", body), null, 2);
+}
+async function freezePlayer(frozen) {
+  const player = document.getElementById("freezeName").value;
+  document.getElementById("freezeResult").textContent = "Working...";
+  document.getElementById("freezeResult").textContent = JSON.stringify(await call("/staff/api/freeze", {player, frozen}), null, 2);
+}
 </script>
 </body></html>
 """
@@ -1376,7 +1503,10 @@ def remote_server_management():
     can_list_players = _has_permission("list_players")
     can_kick = _has_permission("kick_player")
     can_announce = _has_permission("announce")
-    if not (can_list_players or can_kick or can_announce):
+    can_whisper = _has_permission("whisper_player")
+    can_teleport = _has_permission("teleport_player")
+    can_freeze = _has_permission("freeze_player")
+    if not (can_list_players or can_kick or can_announce or can_whisper or can_teleport or can_freeze):
         return _error_page(403, "No access", "Your account doesn't have permission to view Remote Server Management. Ask an admin to grant your role access in Permissions Manager.")
     return render_template_string(
         REMOTE_SERVER_MANAGEMENT_HTML,
@@ -1385,6 +1515,9 @@ def remote_server_management():
         can_list_players=can_list_players,
         can_kick=can_kick,
         can_announce=can_announce,
+        can_whisper=can_whisper,
+        can_teleport=can_teleport,
+        can_freeze=can_freeze,
     )
 
 
@@ -2301,6 +2434,188 @@ def api_request_loa():
     return jsonify({"ok": True, "loaId": loa_id})
 
 
+# ── Database page ────────────────────────────────────────────────────────
+
+DATABASE_HTML = """
+<html><head><title>Database — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>Look up a person</h2>
+    <p class="hint">Search by Discord user ID. Shows their department training checklists, violation history, and staff notes.</p>
+    <input id="lookupId" placeholder="Discord user ID">
+    <button onclick="lookup()">Look up</button>
+  </div>
+  <div id="lookupResult"></div>
+</main>
+<script>
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+let currentLookupId = null;
+
+async function call(url, body) {
+  const res = await fetch(url, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {}) });
+  return res.json();
+}
+
+async function lookup() {
+  const discordUserId = document.getElementById("lookupId").value.trim();
+  currentLookupId = discordUserId;
+  const container = document.getElementById("lookupResult");
+  container.innerHTML = '<div class="card"><pre class="output">Looking up...</pre></div>';
+  const data = await call("/staff/api/database-lookup", {discordUserId});
+  if (data.error) {
+    container.innerHTML = `<div class="card"><pre class="output">${escapeHtml(JSON.stringify(data))}</pre></div>`;
+    return;
+  }
+  renderResult(data);
+}
+
+function renderResult(data) {
+  const container = document.getElementById("lookupResult");
+  let html = `<div class="card"><h2>${escapeHtml(data.username || data.discordUserId)}</h2>
+    <p class="hint">Discord ID: ${escapeHtml(data.discordUserId)}`
+    + (data.robloxUserId ? ` &middot; Roblox ID: ${escapeHtml(data.robloxUserId)}` : ` &middot; No linked Roblox account`)
+    + `</p></div>`;
+
+  html += `<div class="card"><h2>Departments &amp; training</h2>`;
+  if (data.departments.length === 0) {
+    html += `<p class="empty">Not a member of any department.</p>`;
+  }
+  for (const dep of data.departments) {
+    html += `<div style="border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:10px;">
+      <p><b>${escapeHtml(dep.department)}</b> — ${dep.daysIn}/${dep.minDays} days in department</p>`;
+    for (const item of dep.checklistItems) {
+      const checked = dep.checklistProgress[item] ? "checked" : "";
+      html += `<label style="display:block;"><input type="checkbox" data-membership="${dep.membershipId}" data-item="${escapeHtml(item)}" onchange="toggleChecklist(this.dataset.membership, this.dataset.item, this.checked)" ${checked}> ${escapeHtml(item)}</label>`;
+    }
+    html += `</div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="card"><h2>Violations</h2><table><tr><th>When</th><th>Type</th><th>Reason</th><th>By</th><th>Status</th></tr>`;
+  if (data.violations.length === 0) {
+    html += `<tr><td colspan="5" class="empty">No violations on record.</td></tr>`;
+  }
+  for (const v of data.violations) {
+    html += `<tr><td>${escapeHtml(v.timestamp)}</td><td>${escapeHtml(v.restriction)}</td><td>${escapeHtml(v.reason)}</td><td>${escapeHtml(v.issuedBy)}</td><td>${v.revoked ? "Revoked" : "Active"}</td></tr>`;
+  }
+  html += `</table></div>`;
+
+  html += `<div class="card"><h2>Notes</h2>
+    <textarea id="newNote" rows="2" style="width:100%;font-family:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--border);border-radius:6px;" placeholder="Add a note..."></textarea>
+    <button style="margin-top:8px;" onclick="addNote()">Add note</button>
+    <pre class="output" id="noteResult"></pre>
+    <table style="margin-top:10px;"><tr><th>When</th><th>Note</th><th>By</th></tr>`;
+  if (data.notes.length === 0) {
+    html += `<tr><td colspan="3" class="empty">No notes yet.</td></tr>`;
+  }
+  for (const n of data.notes) {
+    html += `<tr><td>${escapeHtml((n.AddedAt || "").slice(0, 16))}</td><td>${escapeHtml(n.Note)}</td><td>${escapeHtml(n.AddedBy)}</td></tr>`;
+  }
+  html += `</table></div>`;
+
+  container.innerHTML = html;
+}
+
+async function toggleChecklist(membershipId, item, checked) {
+  await call("/staff/api/database/checklist", {membershipId, item, done: checked});
+}
+
+async function addNote() {
+  const note = document.getElementById("newNote").value;
+  if (!note.trim()) return;
+  const data = await call("/staff/api/database/notes/add", {discordUserId: currentLookupId, note});
+  if (data.ok) {
+    lookup();
+  } else {
+    document.getElementById("noteResult").textContent = JSON.stringify(data, null, 2);
+  }
+}
+</script>
+</body></html>
+"""
+
+
+@staff_bp.route("/database")
+def database_page():
+    guard = _require_permission("view_database")
+    if guard:
+        return guard
+    return render_template_string(DATABASE_HTML, style=BASE_STYLE, nav=_nav("database"))
+
+
+@staff_bp.route("/api/database-lookup", methods=["POST"])
+def api_database_lookup():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    discord_user_id = str(data.get("discordUserId", "")).strip()
+    if not discord_user_id:
+        return jsonify({"error": "discordUserId is required"}), 400
+
+    memberships = list_department_members(discord_user_id=discord_user_id)
+    departments_by_id = {d["DeptID"]: d for d in list_departments()}
+    username = memberships[0]["Username"] if memberships else ""
+
+    departments = []
+    for m in memberships:
+        dept = departments_by_id.get(m["DeptID"])
+        if not dept:
+            continue
+        elig = get_promotion_eligibility(m, dept)
+        departments.append({
+            "membershipId": m["MembershipID"],
+            "department": dept["Name"],
+            "checklistItems": dept.get("ChecklistItemsList", []),
+            "checklistProgress": m["ChecklistProgressDict"],
+            "daysIn": elig["days_in"],
+            "minDays": elig["min_days"],
+        })
+
+    return jsonify({
+        "discordUserId": discord_user_id,
+        "username": username,
+        "robloxUserId": get_roblox_user_id_for_discord(discord_user_id),
+        "departments": departments,
+        "violations": get_violations_for_person(discord_user_id),
+        "notes": list_player_notes(discord_user_id),
+    })
+
+
+@staff_bp.route("/api/database/checklist", methods=["POST"])
+def api_database_checklist():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    item = str(data.get("item", "")).strip()
+    if not membership_id or not item:
+        return jsonify({"error": "membershipId and item are required"}), 400
+    update_member_checklist(membership_id, item, bool(data.get("done")))
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/database/notes/add", methods=["POST"])
+def api_database_add_note():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    discord_user_id = str(data.get("discordUserId", "")).strip()
+    note = str(data.get("note", "")).strip()[:1000]
+    if not discord_user_id or not note:
+        return jsonify({"error": "discordUserId and note are required"}), 400
+    note_id = add_player_note(discord_user_id, note, session.get("staff_name", ""))
+    return jsonify({"ok": True, "noteId": note_id})
+
+
 PERMISSIONS_HTML = """
 <html><head><title>Permissions Manager</title>{{ style|safe }}</head>
 <body>
@@ -2459,4 +2774,72 @@ def api_announce():
     except Exception as e:
         return jsonify({"error": str(e)}), 502
     print(f"[StaffDashboard] {session.get('staff_name')} announced: {message}")
+    return jsonify(result)
+
+
+@staff_bp.route("/api/whisper", methods=["POST"])
+def api_whisper():
+    guard = _api_permission_guard("whisper_player")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    player = str(data.get("player", "")).strip()
+    message = str(data.get("message", "")).strip()
+    if not player or not message:
+        return jsonify({"error": "player and message are required"}), 400
+    try:
+        result = run_action_live("whisper_player", {"player": player, "message": message})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    print(f"[StaffDashboard] {session.get('staff_name')} whispered '{player}': {message}")
+    return jsonify(result)
+
+
+@staff_bp.route("/api/teleport", methods=["POST"])
+def api_teleport():
+    guard = _api_permission_guard("teleport_player")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    player = str(data.get("player", "")).strip()
+    if not player:
+        return jsonify({"error": "player is required"}), 400
+
+    params = {"player": player}
+    to_player = str(data.get("toPlayer", "")).strip()
+    if to_player:
+        params["toPlayer"] = to_player
+    elif all(k in data and data.get(k) is not None for k in ("x", "y", "z")):
+        try:
+            params["x"] = float(data["x"])
+            params["y"] = float(data["y"])
+            params["z"] = float(data["z"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "x, y, z must be numbers"}), 400
+    else:
+        return jsonify({"error": "provide either toPlayer or x/y/z"}), 400
+
+    try:
+        result = run_action_live("teleport_player", params)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    print(f"[StaffDashboard] {session.get('staff_name')} teleported '{player}'")
+    return jsonify(result)
+
+
+@staff_bp.route("/api/freeze", methods=["POST"])
+def api_freeze():
+    guard = _api_permission_guard("freeze_player")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    player = str(data.get("player", "")).strip()
+    if not player:
+        return jsonify({"error": "player is required"}), 400
+    frozen = bool(data.get("frozen", True))
+    try:
+        result = run_action_live("freeze_player", {"player": player, "frozen": frozen})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+    print(f"[StaffDashboard] {session.get('staff_name')} {'froze' if frozen else 'unfroze'} '{player}'")
     return jsonify(result)
