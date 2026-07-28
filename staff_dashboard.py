@@ -22,6 +22,7 @@ import json
 import html
 import secrets
 import asyncio
+import datetime
 import urllib.parse
 import requests
 from flask import Blueprint, request, redirect, session, jsonify, render_template_string
@@ -52,6 +53,7 @@ KNOWN_PERMISSIONS = {
     "kick_player": "Kick a player",
     "announce": "Send an announcement",
     "manage_site": "Edit site content (Home/Careers text)",
+    "manage_departments": "Manage departments, members, promotions, and LOA",
 }
 # Reserved: never grantable via the roles sheet, only ever held by a true
 # Discord Administrator on the guild. Prevents the permission system from
@@ -100,6 +102,135 @@ def run_action_live(action: str, params: dict = None, timeout_s: float = 20.0):
         if entry is not None:
             return entry
     raise TimeoutError("Timed out waiting for the live game to respond. Is a server instance online?")
+
+
+# ── Generic sheet-backed record store ──────────────────────────────────────
+# Every "table" below (Departments, DepartmentMembers, PromotionRequests,
+# DepartmentLog, LOA, ClockSessions) is a Google Sheet tab addressed by these
+# helpers: auto-create the tab + header row on first use, read all rows as
+# dicts keyed by the header, append a new record, or upsert-by-key. Imports
+# from bot are deferred (inside functions) since staff_dashboard is imported
+# by bot.py before those names exist at module scope.
+
+_sheet_checked_names = set()
+
+
+def _col_letter(index_from_1: int) -> str:
+    """1 -> A, 26 -> Z, 27 -> AA, etc."""
+    letters = ""
+    n = index_from_1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def _sheet_range_urls(sheet_name: str, num_cols: int):
+    from bot import SPREADSHEET_ID
+    last_col = _col_letter(num_cols)
+    read_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet_name}!A:{last_col}"
+    append_url = f"{read_url}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+    return read_url, append_url
+
+
+def _ensure_sheet(sheet_name: str, header_row: list):
+    if sheet_name in _sheet_checked_names:
+        return
+    _sheet_checked_names.add(sheet_name)
+    from bot import sheets_headers, SPREADSHEET_ID
+    read_url, _ = _sheet_range_urls(sheet_name, len(header_row))
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        if resp.ok:
+            return
+        requests.post(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}:batchUpdate",
+            headers=sheets_headers(),
+            json={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]},
+            timeout=10,
+        )
+        last_col = _col_letter(len(header_row))
+        header_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{sheet_name}!A1:{last_col}1?valueInputOption=RAW"
+        requests.put(header_url, headers=sheets_headers(), json={"values": [header_row]}, timeout=10)
+        print(f"[StaffDashboard] Created '{sheet_name}' sheet tab")
+    except Exception as e:
+        print(f"[StaffDashboard] Could not verify/create '{sheet_name}' sheet: {e}")
+
+
+def _sheet_read_all(sheet_name: str, header_row: list) -> list:
+    from bot import sheets_headers
+    _ensure_sheet(sheet_name, header_row)
+    read_url, _ = _sheet_range_urls(sheet_name, len(header_row))
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+    except Exception as e:
+        print(f"[StaffDashboard] {sheet_name} read error: {e}")
+        return []
+    out = []
+    for i, row in enumerate(rows):
+        if i == 0:
+            continue  # header
+        padded = row + [""] * (len(header_row) - len(row))
+        out.append({header_row[j]: padded[j] for j in range(len(header_row))})
+    return out
+
+
+def _sheet_append_row(sheet_name: str, header_row: list, record: dict):
+    from bot import sheets_headers
+    _ensure_sheet(sheet_name, header_row)
+    _, append_url = _sheet_range_urls(sheet_name, len(header_row))
+    row_values = [str(record.get(h, "")) for h in header_row]
+    try:
+        requests.post(append_url, headers=sheets_headers(), json={"values": [row_values]}, timeout=10)
+    except Exception as e:
+        print(f"[StaffDashboard] {sheet_name} append error: {e}")
+
+
+def _sheet_update_row_by_key(sheet_name: str, header_row: list, key_col: str, key_value: str, record: dict):
+    """Overwrites the first row where key_col == key_value, or appends a new one if not found."""
+    from bot import sheets_headers, SPREADSHEET_ID
+    _ensure_sheet(sheet_name, header_row)
+    read_url, append_url = _sheet_range_urls(sheet_name, len(header_row))
+    key_idx = header_row.index(key_col)
+    row_values = [str(record.get(h, "")) for h in header_row]
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if len(row) > key_idx and row[key_idx].strip() == str(key_value).strip():
+                sheet_row = i + 1
+                last_col = _col_letter(len(header_row))
+                range_str = f"{sheet_name}!A{sheet_row}:{last_col}{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}?valueInputOption=RAW"
+                requests.put(url, headers=sheets_headers(), json={"values": [row_values]}, timeout=10)
+                return
+        requests.post(append_url, headers=sheets_headers(), json={"values": [row_values]}, timeout=10)
+    except Exception as e:
+        print(f"[StaffDashboard] {sheet_name} update error: {e}")
+
+
+def _sheet_delete_row_by_key(sheet_name: str, header_row: list, key_col: str, key_value: str):
+    from bot import sheets_headers, SPREADSHEET_ID
+    read_url, _ = _sheet_range_urls(sheet_name, len(header_row))
+    key_idx = header_row.index(key_col)
+    try:
+        resp = requests.get(read_url, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for i, row in enumerate(rows):
+            if i == 0:
+                continue
+            if len(row) > key_idx and row[key_idx].strip() == str(key_value).strip():
+                sheet_row = i + 1
+                last_col = _col_letter(len(header_row))
+                range_str = f"{sheet_name}!A{sheet_row}:{last_col}{sheet_row}"
+                url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{range_str}:clear"
+                requests.post(url, headers=sheets_headers(), timeout=10)
+                return
+    except Exception as e:
+        print(f"[StaffDashboard] {sheet_name} delete error: {e}")
 
 
 # ── StaffPermissions sheet (RoleID | RoleName | Permissions) ───────────────
@@ -297,6 +428,369 @@ def save_site_content(updates: dict):
     _ensure_site_content_sheet()
     for key, value in updates.items():
         _site_content_upsert(key, value)
+
+
+# ── Departments, membership, promotions, LOA, clock-in ─────────────────────
+
+DEPARTMENTS_SHEET = "Departments"
+DEPARTMENTS_HEADERS = ["DeptID", "Name", "Track", "RankOrder", "ResourcesLink", "ChecklistItems", "MinDaysInDept", "DiscordRoleID", "RequireInGameToClockIn"]
+
+DEPT_MEMBERS_SHEET = "DepartmentMembers"
+DEPT_MEMBERS_HEADERS = ["MembershipID", "DiscordUserID", "Username", "DeptID", "JoinedDeptDate", "ChecklistProgress"]
+
+PROMOTION_REQUESTS_SHEET = "PromotionRequests"
+PROMOTION_REQUESTS_HEADERS = ["RequestID", "DiscordUserID", "Username", "FromDeptID", "ToDeptID", "RequestedAt", "Status", "ReviewedBy", "ReviewedAt"]
+
+DEPARTMENT_LOG_SHEET = "DepartmentLog"
+DEPARTMENT_LOG_HEADERS = ["Timestamp", "DiscordUserID", "Action", "DeptID", "PerformedBy", "Details"]
+
+LOA_SHEET = "LOA"
+LOA_HEADERS = ["LoaID", "DiscordUserID", "Username", "StartDate", "EndDate", "Reason", "Status", "RequestedAt"]
+
+CLOCK_SESSIONS_SHEET = "ClockSessions"
+CLOCK_SESSIONS_HEADERS = ["SessionID", "DiscordUserID", "Username", "DeptID", "ClockInAt", "ClockOutAt", "DurationMinutes", "VerifiedInGame"]
+
+
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def log_department_action(discord_user_id, action, dept_id, performed_by, details=""):
+    record = {
+        "Timestamp": datetime.datetime.utcnow().isoformat(),
+        "DiscordUserID": str(discord_user_id),
+        "Action": action,
+        "DeptID": dept_id,
+        "PerformedBy": performed_by,
+        "Details": details,
+    }
+    _sheet_append_row(DEPARTMENT_LOG_SHEET, DEPARTMENT_LOG_HEADERS, record)
+
+
+def list_department_log(limit=100) -> list:
+    rows = _sheet_read_all(DEPARTMENT_LOG_SHEET, DEPARTMENT_LOG_HEADERS)
+    return list(reversed(rows))[:limit]
+
+
+# — Departments —
+
+def list_departments() -> list:
+    rows = _sheet_read_all(DEPARTMENTS_SHEET, DEPARTMENTS_HEADERS)
+    for r in rows:
+        try:
+            r["ChecklistItemsList"] = json.loads(r.get("ChecklistItems") or "[]")
+        except Exception:
+            r["ChecklistItemsList"] = []
+    return rows
+
+
+def get_department(dept_id: str):
+    return next((d for d in list_departments() if d["DeptID"] == dept_id), None)
+
+
+def save_department(dept_id, name, track, rank_order, resources_link, checklist_items, min_days, discord_role_id, require_in_game) -> str:
+    if not dept_id:
+        dept_id = uuid.uuid4().hex[:10]
+    record = {
+        "DeptID": dept_id,
+        "Name": name,
+        "Track": track,
+        "RankOrder": str(rank_order),
+        "ResourcesLink": resources_link,
+        "ChecklistItems": json.dumps(checklist_items),
+        "MinDaysInDept": str(min_days),
+        "DiscordRoleID": discord_role_id or "",
+        "RequireInGameToClockIn": "true" if require_in_game else "false",
+    }
+    _sheet_update_row_by_key(DEPARTMENTS_SHEET, DEPARTMENTS_HEADERS, "DeptID", dept_id, record)
+    return dept_id
+
+
+def delete_department(dept_id: str):
+    _sheet_delete_row_by_key(DEPARTMENTS_SHEET, DEPARTMENTS_HEADERS, "DeptID", dept_id)
+
+
+def get_next_department(dept: dict):
+    """The department in the same Track with the next-higher RankOrder, or None if dept is top of its track."""
+    same_track = [d for d in list_departments() if d["Track"] == dept["Track"] and d["DeptID"] != dept["DeptID"]]
+    higher = [d for d in same_track if _to_int(d["RankOrder"]) > _to_int(dept["RankOrder"])]
+    if not higher:
+        return None
+    return min(higher, key=lambda d: _to_int(d["RankOrder"]))
+
+
+# — Department membership —
+
+def list_department_members(dept_id=None, discord_user_id=None) -> list:
+    rows = _sheet_read_all(DEPT_MEMBERS_SHEET, DEPT_MEMBERS_HEADERS)
+    for r in rows:
+        try:
+            r["ChecklistProgressDict"] = json.loads(r.get("ChecklistProgress") or "{}")
+        except Exception:
+            r["ChecklistProgressDict"] = {}
+    if dept_id:
+        rows = [r for r in rows if r["DeptID"] == dept_id]
+    if discord_user_id:
+        rows = [r for r in rows if r["DiscordUserID"] == str(discord_user_id)]
+    return rows
+
+
+def add_department_member(discord_user_id, username, dept_id) -> str:
+    membership_id = uuid.uuid4().hex[:10]
+    record = {
+        "MembershipID": membership_id,
+        "DiscordUserID": str(discord_user_id),
+        "Username": username,
+        "DeptID": dept_id,
+        "JoinedDeptDate": datetime.datetime.utcnow().isoformat(),
+        "ChecklistProgress": "{}",
+    }
+    _sheet_append_row(DEPT_MEMBERS_SHEET, DEPT_MEMBERS_HEADERS, record)
+    log_department_action(discord_user_id, "joined", dept_id, username)
+    return membership_id
+
+
+def remove_department_member(membership_id: str, performed_by: str = ""):
+    target = next((m for m in list_department_members() if m["MembershipID"] == membership_id), None)
+    _sheet_delete_row_by_key(DEPT_MEMBERS_SHEET, DEPT_MEMBERS_HEADERS, "MembershipID", membership_id)
+    if target:
+        log_department_action(target["DiscordUserID"], "removed", target["DeptID"], performed_by)
+
+
+def update_member_checklist(membership_id: str, item: str, done: bool):
+    target = next((m for m in list_department_members() if m["MembershipID"] == membership_id), None)
+    if not target:
+        return
+    progress = target.get("ChecklistProgressDict", {})
+    progress[item] = bool(done)
+    record = {h: target.get(h, "") for h in DEPT_MEMBERS_HEADERS}
+    record["ChecklistProgress"] = json.dumps(progress)
+    _sheet_update_row_by_key(DEPT_MEMBERS_SHEET, DEPT_MEMBERS_HEADERS, "MembershipID", membership_id, record)
+
+
+def move_member_department(membership_id: str, new_dept_id: str, performed_by: str = ""):
+    target = next((m for m in list_department_members() if m["MembershipID"] == membership_id), None)
+    if not target:
+        return
+    old_dept_id = target["DeptID"]
+    record = {h: target.get(h, "") for h in DEPT_MEMBERS_HEADERS}
+    record["DeptID"] = new_dept_id
+    record["JoinedDeptDate"] = datetime.datetime.utcnow().isoformat()
+    record["ChecklistProgress"] = "{}"
+    _sheet_update_row_by_key(DEPT_MEMBERS_SHEET, DEPT_MEMBERS_HEADERS, "MembershipID", membership_id, record)
+    log_department_action(target["DiscordUserID"], f"promoted:{old_dept_id}->{new_dept_id}", new_dept_id, performed_by)
+
+
+def get_promotion_eligibility(membership: dict, dept: dict) -> dict:
+    next_dept = get_next_department(dept)
+    reasons = []
+    if next_dept is None:
+        reasons.append("No higher department in this track.")
+
+    try:
+        joined = datetime.datetime.fromisoformat(membership["JoinedDeptDate"])
+        days_in = (datetime.datetime.utcnow() - joined).days
+    except Exception:
+        days_in = 0
+    min_days = _to_int(dept.get("MinDaysInDept"))
+    if days_in < min_days:
+        reasons.append(f"Needs {min_days - days_in} more day(s) in this department.")
+
+    progress = membership.get("ChecklistProgressDict", {})
+    items = dept.get("ChecklistItemsList", [])
+    incomplete = [item for item in items if not progress.get(item)]
+    if incomplete:
+        reasons.append(f"{len(incomplete)} checklist item(s) not yet marked complete.")
+
+    return {
+        "eligible": next_dept is not None and not reasons,
+        "reasons": reasons,
+        "next_dept": next_dept,
+        "days_in": days_in,
+        "min_days": min_days,
+    }
+
+
+# — Promotion requests —
+
+def list_promotion_requests(status=None) -> list:
+    rows = _sheet_read_all(PROMOTION_REQUESTS_SHEET, PROMOTION_REQUESTS_HEADERS)
+    if status:
+        rows = [r for r in rows if r["Status"] == status]
+    return rows
+
+
+def create_promotion_request(discord_user_id, username, from_dept_id, to_dept_id) -> str:
+    request_id = uuid.uuid4().hex[:10]
+    record = {
+        "RequestID": request_id,
+        "DiscordUserID": str(discord_user_id),
+        "Username": username,
+        "FromDeptID": from_dept_id,
+        "ToDeptID": to_dept_id,
+        "RequestedAt": datetime.datetime.utcnow().isoformat(),
+        "Status": "Pending",
+        "ReviewedBy": "",
+        "ReviewedAt": "",
+    }
+    _sheet_append_row(PROMOTION_REQUESTS_SHEET, PROMOTION_REQUESTS_HEADERS, record)
+    return request_id
+
+
+def review_promotion_request(request_id, status, reviewed_by):
+    target = next((r for r in list_promotion_requests() if r["RequestID"] == request_id), None)
+    if not target:
+        return None
+    record = {h: target.get(h, "") for h in PROMOTION_REQUESTS_HEADERS}
+    record["Status"] = status
+    record["ReviewedBy"] = reviewed_by
+    record["ReviewedAt"] = datetime.datetime.utcnow().isoformat()
+    _sheet_update_row_by_key(PROMOTION_REQUESTS_SHEET, PROMOTION_REQUESTS_HEADERS, "RequestID", request_id, record)
+    return target
+
+
+# — LOA —
+
+def list_loa(status=None, discord_user_id=None) -> list:
+    rows = _sheet_read_all(LOA_SHEET, LOA_HEADERS)
+    if status:
+        rows = [r for r in rows if r["Status"] == status]
+    if discord_user_id:
+        rows = [r for r in rows if r["DiscordUserID"] == str(discord_user_id)]
+    return rows
+
+
+def create_loa_request(discord_user_id, username, start_date, end_date, reason) -> str:
+    loa_id = uuid.uuid4().hex[:10]
+    record = {
+        "LoaID": loa_id,
+        "DiscordUserID": str(discord_user_id),
+        "Username": username,
+        "StartDate": start_date,
+        "EndDate": end_date,
+        "Reason": reason,
+        "Status": "Pending",
+        "RequestedAt": datetime.datetime.utcnow().isoformat(),
+    }
+    _sheet_append_row(LOA_SHEET, LOA_HEADERS, record)
+    return loa_id
+
+
+def review_loa_request(loa_id, status):
+    target = next((r for r in list_loa() if r["LoaID"] == loa_id), None)
+    if not target:
+        return
+    record = {h: target.get(h, "") for h in LOA_HEADERS}
+    record["Status"] = status
+    _sheet_update_row_by_key(LOA_SHEET, LOA_HEADERS, "LoaID", loa_id, record)
+
+
+# — Clock in/out —
+
+def get_active_clock_session(discord_user_id, dept_id):
+    rows = _sheet_read_all(CLOCK_SESSIONS_SHEET, CLOCK_SESSIONS_HEADERS)
+    return next((r for r in rows if r["DiscordUserID"] == str(discord_user_id) and r["DeptID"] == dept_id and not r.get("ClockOutAt")), None)
+
+
+def clock_in(discord_user_id, username, dept_id, verified_in_game: bool) -> str:
+    session_id = uuid.uuid4().hex[:10]
+    record = {
+        "SessionID": session_id,
+        "DiscordUserID": str(discord_user_id),
+        "Username": username,
+        "DeptID": dept_id,
+        "ClockInAt": datetime.datetime.utcnow().isoformat(),
+        "ClockOutAt": "",
+        "DurationMinutes": "",
+        "VerifiedInGame": "true" if verified_in_game else "false",
+    }
+    _sheet_append_row(CLOCK_SESSIONS_SHEET, CLOCK_SESSIONS_HEADERS, record)
+    log_department_action(discord_user_id, "clocked_in", dept_id, username)
+    return session_id
+
+
+def clock_out(session_id, performed_by=""):
+    target = next((r for r in _sheet_read_all(CLOCK_SESSIONS_SHEET, CLOCK_SESSIONS_HEADERS) if r["SessionID"] == session_id), None)
+    if not target:
+        return
+    try:
+        started = datetime.datetime.fromisoformat(target["ClockInAt"])
+        duration = int((datetime.datetime.utcnow() - started).total_seconds() // 60)
+    except Exception:
+        duration = 0
+    record = {h: target.get(h, "") for h in CLOCK_SESSIONS_HEADERS}
+    record["ClockOutAt"] = datetime.datetime.utcnow().isoformat()
+    record["DurationMinutes"] = str(duration)
+    _sheet_update_row_by_key(CLOCK_SESSIONS_SHEET, CLOCK_SESSIONS_HEADERS, "SessionID", session_id, record)
+    log_department_action(target["DiscordUserID"], "clocked_out", target["DeptID"], performed_by or target.get("Username", ""))
+
+
+def list_active_clock_sessions() -> list:
+    return [r for r in _sheet_read_all(CLOCK_SESSIONS_SHEET, CLOCK_SESSIONS_HEADERS) if not r.get("ClockOutAt")]
+
+
+# — Roblox in-game verification (reuses the /verify OAuth mapping bot.py already keeps) —
+
+def get_roblox_user_id_for_discord(discord_user_id: str):
+    from bot import sheets_headers, VERIFIED_USERS_READ_URL
+    try:
+        resp = requests.get(VERIFIED_USERS_READ_URL, headers=sheets_headers(), timeout=10)
+        rows = resp.json().get("values", [])
+        for row in rows:
+            if len(row) >= 2 and row[0].strip() == str(discord_user_id).strip():
+                return row[1].strip()
+    except Exception as e:
+        print(f"[StaffDashboard] VerifiedUsers lookup error: {e}")
+    return None
+
+
+def is_user_in_game(roblox_user_id: str) -> bool:
+    try:
+        result = run_action_live("list_players")
+        if not result.get("ok"):
+            return False
+        players = result.get("data") or []
+        return any(str(p.get("userId")) == str(roblox_user_id) for p in players)
+    except Exception as e:
+        print(f"[StaffDashboard] in-game check error: {e}")
+        return False
+
+
+# — Discord role sync on promotion approval —
+
+def sync_discord_role(discord_user_id: str, old_role_id: str, new_role_id: str):
+    """Best-effort: remove the old dept's role, add the new one. Returns (ok, message)."""
+    if not DASHBOARD_GUILD_ID:
+        return False, "DASHBOARD_GUILD_ID not configured"
+    from bot import bot as bot_instance
+
+    guild = bot_instance.get_guild(int(DASHBOARD_GUILD_ID))
+    if guild is None:
+        return False, "Bot is not in the configured guild"
+
+    async def _do_sync():
+        member = await guild.fetch_member(int(discord_user_id))
+        if old_role_id:
+            old_role = guild.get_role(int(old_role_id))
+            if old_role and old_role in member.roles:
+                await member.remove_roles(old_role, reason="Department promotion")
+        added_name = None
+        if new_role_id:
+            new_role = guild.get_role(int(new_role_id))
+            if new_role:
+                await member.add_roles(new_role, reason="Department promotion")
+                added_name = new_role.name
+        return added_name
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_do_sync(), bot_instance.loop)
+        added_name = future.result(timeout=10)
+        return True, (f"Role synced ({added_name})" if added_name else "Role synced")
+    except Exception as e:
+        return False, f"Role sync failed: {e}"
 
 
 def _compute_permissions(member) -> set:
@@ -527,8 +1021,11 @@ def _nav(active: str = ""):
     links = [link("/staff/", "Home", "home")]
     if _is_logged_in():
         links.append(link("/staff/drivers-info", "Drivers Info", "drivers"))
+        links.append(link("/staff/my-departments", "My Departments", "my-departments"))
         if _has_permission("manage_site"):
             links.append(link("/staff/site-management", "Site Management", "site"))
+        if _has_permission("manage_departments"):
+            links.append(link("/staff/departments", "Departments", "departments"))
         if _has_permission(MANAGE_PERMISSIONS):
             links.append(link("/staff/permissions", "Permissions Manager", "permissions"))
 
@@ -765,6 +1262,18 @@ LANDING_HTML = """
       <a class="btn secondary" href="/staff/drivers-info">Open</a>
     </div>
     {% endif %}
+    <div class="card">
+      <h2>My Departments</h2>
+      <p class="hint">Your department memberships, training checklists, and clock-in.</p>
+      <a class="btn secondary" href="/staff/my-departments">Open</a>
+    </div>
+    {% if can_manage_departments %}
+    <div class="card">
+      <h2>Departments</h2>
+      <p class="hint">Manage departments, members, promotions, and LOA.</p>
+      <a class="btn secondary" href="/staff/departments">Open</a>
+    </div>
+    {% endif %}
     {% if can_manage_site %}
     <div class="card">
       <h2>Site Management</h2>
@@ -795,6 +1304,7 @@ def landing():
         logged_in=_is_logged_in(),
         can_drivers=_has_permission("list_players") or _has_permission("kick_player") or _has_permission("announce"),
         can_manage_site=_has_permission("manage_site"),
+        can_manage_departments=_has_permission("manage_departments"),
         can_manage_permissions=_has_permission(MANAGE_PERMISSIONS),
     )
 
@@ -1023,6 +1533,734 @@ def api_site_content_save():
     save_site_content(updates)
     print(f"[StaffDashboard] {session.get('staff_name')} updated site content")
     return jsonify({"ok": True})
+
+
+# ── Departments admin page ──────────────────────────────────────────────
+
+DEPARTMENTS_ADMIN_HTML = """
+<html><head><title>Departments — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  <div class="card">
+    <h2>Create / edit a department</h2>
+    <input type="hidden" id="deptId">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+      <label>Name<br><input id="deptName" style="width:200px;"></label>
+      <label>Track<br><input id="deptTrack" placeholder="e.g. Bus Driver" style="width:160px;"></label>
+      <label>Rank order<br><input id="deptRank" type="number" style="width:90px;"></label>
+      <label>Min days in dept<br><input id="deptMinDays" type="number" value="0" style="width:90px;"></label>
+      <label>Discord role ID<br><input id="deptRoleId" style="width:160px;"></label>
+    </div>
+    <label>Resources link<br><input id="deptResources" style="width:100%;"></label>
+    <div style="margin-top:10px;">
+      <label>Checklist items (one per line)<br>
+        <textarea id="deptChecklist" rows="4" style="width:100%;font-family:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--border);border-radius:6px;"></textarea>
+      </label>
+    </div>
+    <label style="display:block;margin-top:10px;"><input type="checkbox" id="deptRequireInGame"> Require in-game verification to clock in</label>
+    <div style="margin-top:12px;">
+      <button class="btn" onclick="saveDepartment()">Save department</button>
+      <button onclick="resetDeptForm()">Clear form</button>
+    </div>
+    <pre class="output" id="deptSaveResult"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Departments</h2>
+    <table>
+      <tr><th>Name</th><th>Track</th><th>Rank</th><th>Min days</th><th>In-game?</th><th></th></tr>
+      {% for d in departments %}
+      <tr>
+        <td>{{ d.Name }}</td><td>{{ d.Track }}</td><td>{{ d.RankOrder }}</td><td>{{ d.MinDaysInDept }}</td>
+        <td>{{ "Yes" if d.RequireInGameToClockIn == "true" else "No" }}</td>
+        <td>
+          <button
+            data-id="{{ d.DeptID }}" data-name="{{ d.Name }}" data-track="{{ d.Track }}"
+            data-rank="{{ d.RankOrder }}" data-mindays="{{ d.MinDaysInDept }}" data-roleid="{{ d.DiscordRoleID }}"
+            data-resources="{{ d.ResourcesLink }}" data-checklist="{{ d.ChecklistItemsList|join('\n') }}"
+            data-requireingame="{{ d.RequireInGameToClockIn }}"
+            onclick="editDepartment(this.dataset)">Edit</button>
+          <button class="danger" onclick="deleteDepartment('{{ d.DeptID }}')">Delete</button>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">No departments yet — create one above.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  {% for dept in departments %}
+  <div class="card">
+    <h2>{{ dept.Name }} members</h2>
+    <table>
+      <tr><th>Username</th><th>Joined</th><th>Checklist</th><th>Move to</th><th></th></tr>
+      {% for m in members_by_dept.get(dept.DeptID, []) %}
+      <tr>
+        <td>{{ m.Username }}</td>
+        <td>{{ m.JoinedDeptDate[:10] }}</td>
+        <td>
+          {% for item in dept.ChecklistItemsList %}
+          <label style="display:block;"><input type="checkbox" data-membership="{{ m.MembershipID }}" data-item="{{ item }}" onchange="toggleChecklist(this.dataset.membership, this.dataset.item, this.checked)" {% if m.ChecklistProgressDict.get(item) %}checked{% endif %}> {{ item }}</label>
+          {% endfor %}
+        </td>
+        <td>
+          <select id="moveTarget_{{ m.MembershipID }}">
+            {% for d2 in departments %}<option value="{{ d2.DeptID }}" {% if d2.DeptID == dept.DeptID %}selected{% endif %}>{{ d2.Name }}</option>{% endfor %}
+          </select>
+          <button onclick="moveMember('{{ m.MembershipID }}')">Move</button>
+        </td>
+        <td><button class="danger" onclick="removeMember('{{ m.MembershipID }}')">Remove</button></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">No members yet.</td></tr>
+      {% endfor %}
+    </table>
+    <div style="margin-top:10px;">
+      <select id="addMemberSelect_{{ dept.DeptID }}">
+        {% for gm in guild_members %}<option value="{{ gm.id }}" data-name="{{ gm.name }}">{{ gm.name }}</option>{% endfor %}
+      </select>
+      <button onclick="addMember('{{ dept.DeptID }}')">Add member</button>
+    </div>
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <h2>Pending promotion requests</h2>
+    <table>
+      <tr><th>Username</th><th>From</th><th>To</th><th>Requested</th><th></th></tr>
+      {% for r in promotion_requests %}
+      <tr>
+        <td>{{ r.Username }}</td><td>{{ dept_names.get(r.FromDeptID, r.FromDeptID) }}</td><td>{{ dept_names.get(r.ToDeptID, r.ToDeptID) }}</td>
+        <td>{{ r.RequestedAt[:10] }}</td>
+        <td><button onclick="reviewPromotion('{{ r.RequestID }}','Approved')">Approve</button> <button class="danger" onclick="reviewPromotion('{{ r.RequestID }}','Denied')">Deny</button></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">No pending requests.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Pending LOA requests</h2>
+    <table>
+      <tr><th>Username</th><th>Start</th><th>End</th><th>Reason</th><th></th></tr>
+      {% for l in loa_requests %}
+      <tr>
+        <td>{{ l.Username }}</td><td>{{ l.StartDate }}</td><td>{{ l.EndDate }}</td><td>{{ l.Reason }}</td>
+        <td><button onclick="reviewLoa('{{ l.LoaID }}','Approved')">Approve</button> <button class="danger" onclick="reviewLoa('{{ l.LoaID }}','Denied')">Deny</button></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">No pending LOA requests.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Currently clocked in</h2>
+    <table>
+      <tr><th>Username</th><th>Dept</th><th>Since</th><th>Verified in-game</th><th></th></tr>
+      {% for c in active_clock_sessions %}
+      <tr>
+        <td>{{ c.Username }}</td><td>{{ dept_names.get(c.DeptID, c.DeptID) }}</td><td>{{ c.ClockInAt[:16] }}</td>
+        <td>{{ "Yes" if c.VerifiedInGame == "true" else "No" }}</td>
+        <td><button class="danger" onclick="forceClockOut('{{ c.SessionID }}')">Force clock out</button></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="empty">Nobody currently clocked in.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Staff profile lookup</h2>
+    <input id="lookupId" placeholder="Discord user ID">
+    <button onclick="lookupProfile()">Look up</button>
+    <pre class="output" id="lookupResult"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Activity log</h2>
+    <table>
+      <tr><th>When</th><th>Action</th><th>Dept</th><th>By</th></tr>
+      {% for l in activity_log %}
+      <tr><td>{{ l.Timestamp[:16] }}</td><td>{{ l.Action }}</td><td>{{ dept_names.get(l.DeptID, l.DeptID) }}</td><td>{{ l.PerformedBy }}</td></tr>
+      {% else %}
+      <tr><td colspan="4" class="empty">No activity logged yet.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</main>
+<script>
+async function call(url, body) {
+  const res = await fetch(url, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {}) });
+  return res.json();
+}
+
+function resetDeptForm() {
+  document.getElementById("deptId").value = "";
+  document.getElementById("deptName").value = "";
+  document.getElementById("deptTrack").value = "";
+  document.getElementById("deptRank").value = "";
+  document.getElementById("deptMinDays").value = "0";
+  document.getElementById("deptRoleId").value = "";
+  document.getElementById("deptResources").value = "";
+  document.getElementById("deptChecklist").value = "";
+  document.getElementById("deptRequireInGame").checked = false;
+}
+
+function editDepartment(d) {
+  // d is a button's dataset (DOMStringMap) — the browser already HTML-decoded
+  // each attribute, so these are the raw values, not JSON.
+  document.getElementById("deptId").value = d.id;
+  document.getElementById("deptName").value = d.name;
+  document.getElementById("deptTrack").value = d.track;
+  document.getElementById("deptRank").value = d.rank;
+  document.getElementById("deptMinDays").value = d.mindays;
+  document.getElementById("deptRoleId").value = d.roleid;
+  document.getElementById("deptResources").value = d.resources;
+  document.getElementById("deptChecklist").value = d.checklist || "";
+  document.getElementById("deptRequireInGame").checked = d.requireingame === "true";
+  window.scrollTo(0, 0);
+}
+
+async function saveDepartment() {
+  const body = {
+    deptId: document.getElementById("deptId").value,
+    name: document.getElementById("deptName").value,
+    track: document.getElementById("deptTrack").value,
+    rankOrder: document.getElementById("deptRank").value,
+    minDays: document.getElementById("deptMinDays").value,
+    discordRoleId: document.getElementById("deptRoleId").value,
+    resourcesLink: document.getElementById("deptResources").value,
+    checklistItems: document.getElementById("deptChecklist").value.split("\\n").map(s => s.trim()).filter(Boolean),
+    requireInGame: document.getElementById("deptRequireInGame").checked,
+  };
+  document.getElementById("deptSaveResult").textContent = "Saving...";
+  const data = await call("/staff/api/departments", body);
+  document.getElementById("deptSaveResult").textContent = JSON.stringify(data, null, 2);
+  if (data.ok) setTimeout(() => location.reload(), 500);
+}
+
+async function deleteDepartment(id) {
+  if (!confirm("Delete this department? This does not remove its members.")) return;
+  await call("/staff/api/departments/delete", {deptId: id});
+  location.reload();
+}
+
+async function toggleChecklist(membershipId, item, checked) {
+  await call("/staff/api/departments/members/checklist", {membershipId, item, done: checked});
+}
+
+async function addMember(deptId) {
+  const sel = document.getElementById("addMemberSelect_" + deptId);
+  const discordUserId = sel.value;
+  const username = sel.options[sel.selectedIndex].dataset.name;
+  await call("/staff/api/departments/members/add", {deptId, discordUserId, username});
+  location.reload();
+}
+
+async function removeMember(membershipId) {
+  if (!confirm("Remove this member from the department?")) return;
+  await call("/staff/api/departments/members/remove", {membershipId});
+  location.reload();
+}
+
+async function moveMember(membershipId) {
+  const sel = document.getElementById("moveTarget_" + membershipId);
+  await call("/staff/api/departments/members/move", {membershipId, newDeptId: sel.value});
+  location.reload();
+}
+
+async function reviewPromotion(requestId, status) {
+  await call("/staff/api/promotions/review", {requestId, status});
+  location.reload();
+}
+
+async function reviewLoa(loaId, status) {
+  await call("/staff/api/loa/review", {loaId, status});
+  location.reload();
+}
+
+async function forceClockOut(sessionId) {
+  await call("/staff/api/clock/force-out", {sessionId});
+  location.reload();
+}
+
+async function lookupProfile() {
+  const discordUserId = document.getElementById("lookupId").value;
+  document.getElementById("lookupResult").textContent = "Looking up...";
+  const data = await call("/staff/api/profile-lookup", {discordUserId});
+  document.getElementById("lookupResult").textContent = JSON.stringify(data, null, 2);
+}
+</script>
+</body></html>
+"""
+
+
+@staff_bp.route("/departments")
+def departments_page():
+    guard = _require_permission("manage_departments")
+    if guard:
+        return guard
+
+    from bot import bot as bot_instance
+    guild = bot_instance.get_guild(int(DASHBOARD_GUILD_ID)) if DASHBOARD_GUILD_ID else None
+    guild_members = sorted(
+        ({"id": m.id, "name": str(m)} for m in guild.members),
+        key=lambda m: m["name"].lower(),
+    ) if guild else []
+
+    departments = list_departments()
+    dept_names = {d["DeptID"]: d["Name"] for d in departments}
+    members_by_dept = {}
+    for d in departments:
+        members_by_dept[d["DeptID"]] = list_department_members(dept_id=d["DeptID"])
+
+    return render_template_string(
+        DEPARTMENTS_ADMIN_HTML,
+        style=BASE_STYLE,
+        nav=_nav("departments"),
+        departments=departments,
+        dept_names=dept_names,
+        members_by_dept=members_by_dept,
+        guild_members=guild_members,
+        promotion_requests=list_promotion_requests(status="Pending"),
+        loa_requests=list_loa(status="Pending"),
+        active_clock_sessions=list_active_clock_sessions(),
+        activity_log=list_department_log(limit=50),
+    )
+
+
+@staff_bp.route("/api/departments", methods=["POST"])
+def api_departments_save():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    dept_id = save_department(
+        dept_id=str(data.get("deptId", "")).strip(),
+        name=str(data.get("name", "")).strip()[:100],
+        track=str(data.get("track", "")).strip()[:100],
+        rank_order=_to_int(data.get("rankOrder")),
+        resources_link=str(data.get("resourcesLink", "")).strip()[:500],
+        checklist_items=[str(i).strip()[:200] for i in (data.get("checklistItems") or [])][:30],
+        min_days=_to_int(data.get("minDays")),
+        discord_role_id=str(data.get("discordRoleId", "")).strip(),
+        require_in_game=bool(data.get("requireInGame")),
+    )
+    print(f"[StaffDashboard] {session.get('staff_name')} saved department {dept_id}")
+    return jsonify({"ok": True, "deptId": dept_id})
+
+
+@staff_bp.route("/api/departments/delete", methods=["POST"])
+def api_departments_delete():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    dept_id = str(data.get("deptId", "")).strip()
+    if not dept_id:
+        return jsonify({"error": "deptId is required"}), 400
+    delete_department(dept_id)
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/departments/members/add", methods=["POST"])
+def api_department_member_add():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    dept_id = str(data.get("deptId", "")).strip()
+    discord_user_id = str(data.get("discordUserId", "")).strip()
+    username = str(data.get("username", "")).strip()
+    if not dept_id or not discord_user_id:
+        return jsonify({"error": "deptId and discordUserId are required"}), 400
+    membership_id = add_department_member(discord_user_id, username, dept_id)
+    return jsonify({"ok": True, "membershipId": membership_id})
+
+
+@staff_bp.route("/api/departments/members/remove", methods=["POST"])
+def api_department_member_remove():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    if not membership_id:
+        return jsonify({"error": "membershipId is required"}), 400
+    remove_department_member(membership_id, performed_by=session.get("staff_name", ""))
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/departments/members/checklist", methods=["POST"])
+def api_department_member_checklist():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    item = str(data.get("item", "")).strip()
+    if not membership_id or not item:
+        return jsonify({"error": "membershipId and item are required"}), 400
+    update_member_checklist(membership_id, item, bool(data.get("done")))
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/departments/members/move", methods=["POST"])
+def api_department_member_move():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    new_dept_id = str(data.get("newDeptId", "")).strip()
+    if not membership_id or not new_dept_id:
+        return jsonify({"error": "membershipId and newDeptId are required"}), 400
+
+    member = next((m for m in list_department_members() if m["MembershipID"] == membership_id), None)
+    if not member:
+        return jsonify({"error": "membership not found"}), 404
+    old_dept = get_department(member["DeptID"])
+    new_dept = get_department(new_dept_id)
+
+    move_member_department(membership_id, new_dept_id, performed_by=session.get("staff_name", ""))
+    role_ok, role_msg = sync_discord_role(
+        member["DiscordUserID"],
+        old_dept.get("DiscordRoleID") if old_dept else "",
+        new_dept.get("DiscordRoleID") if new_dept else "",
+    )
+    return jsonify({"ok": True, "roleSync": role_msg})
+
+
+@staff_bp.route("/api/promotions/review", methods=["POST"])
+def api_promotion_review():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    request_id = str(data.get("requestId", "")).strip()
+    status = "Approved" if str(data.get("status", "")).strip() == "Approved" else "Denied"
+    reviewer = session.get("staff_name", "")
+
+    target = review_promotion_request(request_id, status, reviewer)
+    if not target:
+        return jsonify({"error": "request not found"}), 404
+
+    role_msg = None
+    if status == "Approved":
+        member = next(
+            (m for m in list_department_members(discord_user_id=target["DiscordUserID"]) if m["DeptID"] == target["FromDeptID"]),
+            None,
+        )
+        if member:
+            old_dept = get_department(target["FromDeptID"])
+            new_dept = get_department(target["ToDeptID"])
+            move_member_department(member["MembershipID"], target["ToDeptID"], performed_by=reviewer)
+            _, role_msg = sync_discord_role(
+                target["DiscordUserID"],
+                old_dept.get("DiscordRoleID") if old_dept else "",
+                new_dept.get("DiscordRoleID") if new_dept else "",
+            )
+    return jsonify({"ok": True, "roleSync": role_msg})
+
+
+@staff_bp.route("/api/loa/review", methods=["POST"])
+def api_loa_review():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    loa_id = str(data.get("loaId", "")).strip()
+    status = "Approved" if str(data.get("status", "")).strip() == "Approved" else "Denied"
+    review_loa_request(loa_id, status)
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/clock/force-out", methods=["POST"])
+def api_clock_force_out():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    session_id = str(data.get("sessionId", "")).strip()
+    if not session_id:
+        return jsonify({"error": "sessionId is required"}), 400
+    clock_out(session_id, performed_by=session.get("staff_name", ""))
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/profile-lookup", methods=["POST"])
+def api_profile_lookup():
+    guard = _api_permission_guard("manage_departments")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    discord_user_id = str(data.get("discordUserId", "")).strip()
+    if not discord_user_id:
+        return jsonify({"error": "discordUserId is required"}), 400
+
+    memberships = list_department_members(discord_user_id=discord_user_id)
+    departments_by_id = {d["DeptID"]: d for d in list_departments()}
+    profile = []
+    for m in memberships:
+        dept = departments_by_id.get(m["DeptID"])
+        if not dept:
+            continue
+        elig = get_promotion_eligibility(m, dept)
+        profile.append({
+            "department": dept["Name"],
+            "joinedDeptDate": m["JoinedDeptDate"],
+            "checklistProgress": m["ChecklistProgressDict"],
+            "eligibleForPromotion": elig["eligible"],
+            "reasons": elig["reasons"],
+            "nextDept": elig["next_dept"]["Name"] if elig["next_dept"] else None,
+        })
+
+    return jsonify({
+        "discordUserId": discord_user_id,
+        "departments": profile,
+        "loaHistory": list_loa(discord_user_id=discord_user_id),
+    })
+
+
+# ── My Departments (staff-facing, not permission-gated) ────────────────────
+
+def _require_own_membership(membership_id: str):
+    """Returns the membership dict if it belongs to the current session user, else None."""
+    discord_id = session.get("staff_discord_id")
+    m = next((x for x in list_department_members() if x["MembershipID"] == membership_id), None)
+    if m and m["DiscordUserID"] == discord_id:
+        return m
+    return None
+
+
+MY_DEPARTMENTS_HTML = """
+<html><head><title>My Departments — Busways</title>{{ style|safe }}</head>
+<body>
+{{ nav|safe }}
+<main>
+  {% for row in rows %}
+  <div class="card">
+    <h2>{{ row.dept.Name }}</h2>
+    <p class="hint">Track: {{ row.dept.Track }} &middot; Rank {{ row.dept.RankOrder }}</p>
+    {% if row.dept.ResourcesLink %}<p><a href="{{ row.dept.ResourcesLink }}" target="_blank" rel="noopener">Resources</a></p>{% endif %}
+
+    <p><b>Time in department:</b> {{ row.eligibility.days_in }} / {{ row.eligibility.min_days }} days</p>
+
+    {% if row.dept.ChecklistItemsList %}
+    <p><b>Training checklist</b> (checked off by staff, view-only):</p>
+    <ul>
+      {% for item in row.dept.ChecklistItemsList %}
+      <li>{{ "✅" if row.membership.ChecklistProgressDict.get(item) else "⬜" }} {{ item }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if row.eligibility.next_dept %}
+      {% if row.eligibility.eligible %}
+        {% if row.has_pending_request %}
+        <p class="hint">Promotion request to {{ row.eligibility.next_dept.Name }} is pending admin approval.</p>
+        {% else %}
+        <button class="btn" onclick="requestPromotion('{{ row.membership.MembershipID }}')">Request promotion to {{ row.eligibility.next_dept.Name }}</button>
+        {% endif %}
+      {% else %}
+      <p class="hint">Not yet eligible for {{ row.eligibility.next_dept.Name }}: {{ row.eligibility.reasons|join(", ") }}</p>
+      {% endif %}
+    {% endif %}
+
+    <div style="margin-top:14px;">
+      {% if row.active_session %}
+      <button class="danger" onclick="clockOut('{{ row.membership.MembershipID }}')">Clock out</button>
+      <span class="hint"> Clocked in since {{ row.active_session.ClockInAt[:16] }}</span>
+      {% else %}
+      <button onclick="clockIn('{{ row.membership.MembershipID }}')">Clock in{% if row.dept.RequireInGameToClockIn == "true" %} (requires in-game){% endif %}</button>
+      {% endif %}
+    </div>
+    <pre class="output" id="result_{{ row.membership.MembershipID }}"></pre>
+  </div>
+  {% else %}
+  <div class="card"><p class="empty">You're not currently a member of any department.</p></div>
+  {% endfor %}
+
+  <div class="card">
+    <h2>Leave of Absence</h2>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <label>Start date<br><input id="loaStart" type="date"></label>
+      <label>End date<br><input id="loaEnd" type="date"></label>
+      <label>Reason<br><input id="loaReason" style="width:260px;"></label>
+    </div>
+    <button class="btn" style="margin-top:10px;" onclick="requestLoa()">Request LOA</button>
+    <pre class="output" id="loaResult"></pre>
+
+    <table style="margin-top:14px;">
+      <tr><th>Start</th><th>End</th><th>Reason</th><th>Status</th></tr>
+      {% for l in my_loa %}
+      <tr><td>{{ l.StartDate }}</td><td>{{ l.EndDate }}</td><td>{{ l.Reason }}</td><td>{{ l.Status }}</td></tr>
+      {% else %}
+      <tr><td colspan="4" class="empty">No LOA history.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</main>
+<script>
+async function call(url, body) {
+  const res = await fetch(url, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {}) });
+  return res.json();
+}
+async function requestPromotion(membershipId) {
+  const el = document.getElementById("result_" + membershipId);
+  el.textContent = "Submitting...";
+  const data = await call("/staff/api/my-departments/request-promotion", {membershipId});
+  el.textContent = JSON.stringify(data, null, 2);
+  if (data.ok) setTimeout(() => location.reload(), 800);
+}
+async function clockIn(membershipId) {
+  const el = document.getElementById("result_" + membershipId);
+  el.textContent = "Working...";
+  const data = await call("/staff/api/my-departments/clock-in", {membershipId});
+  el.textContent = JSON.stringify(data, null, 2);
+  if (data.ok) setTimeout(() => location.reload(), 500);
+}
+async function clockOut(membershipId) {
+  const el = document.getElementById("result_" + membershipId);
+  el.textContent = "Working...";
+  const data = await call("/staff/api/my-departments/clock-out", {membershipId});
+  el.textContent = JSON.stringify(data, null, 2);
+  if (data.ok) setTimeout(() => location.reload(), 500);
+}
+async function requestLoa() {
+  const startDate = document.getElementById("loaStart").value;
+  const endDate = document.getElementById("loaEnd").value;
+  const reason = document.getElementById("loaReason").value;
+  document.getElementById("loaResult").textContent = "Submitting...";
+  const data = await call("/staff/api/my-departments/request-loa", {startDate, endDate, reason});
+  document.getElementById("loaResult").textContent = JSON.stringify(data, null, 2);
+  if (data.ok) setTimeout(() => location.reload(), 800);
+}
+</script>
+</body></html>
+"""
+
+
+@staff_bp.route("/my-departments")
+def my_departments_page():
+    if not _is_logged_in():
+        return redirect("/staff/login")
+    discord_id = session.get("staff_discord_id")
+    memberships = list_department_members(discord_user_id=discord_id)
+    departments_by_id = {d["DeptID"]: d for d in list_departments()}
+    pending_requests = list_promotion_requests(status="Pending")
+
+    rows = []
+    for m in memberships:
+        dept = departments_by_id.get(m["DeptID"])
+        if not dept:
+            continue
+        elig = get_promotion_eligibility(m, dept)
+        has_pending = any(r["DiscordUserID"] == discord_id and r["FromDeptID"] == dept["DeptID"] for r in pending_requests)
+        rows.append({
+            "membership": m,
+            "dept": dept,
+            "eligibility": elig,
+            "has_pending_request": has_pending,
+            "active_session": get_active_clock_session(discord_id, dept["DeptID"]),
+        })
+
+    return render_template_string(
+        MY_DEPARTMENTS_HTML,
+        style=BASE_STYLE,
+        nav=_nav("my-departments"),
+        rows=rows,
+        my_loa=list_loa(discord_user_id=discord_id),
+    )
+
+
+@staff_bp.route("/api/my-departments/request-promotion", methods=["POST"])
+def api_request_promotion():
+    if not _is_logged_in():
+        return jsonify({"error": "not logged in"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    member = _require_own_membership(membership_id)
+    if not member:
+        return jsonify({"error": "membership not found"}), 404
+    dept = get_department(member["DeptID"])
+    if not dept:
+        return jsonify({"error": "department not found"}), 404
+    elig = get_promotion_eligibility(member, dept)
+    if not elig["eligible"]:
+        return jsonify({"error": "not eligible", "reasons": elig["reasons"]}), 400
+    existing = [
+        r for r in list_promotion_requests(status="Pending")
+        if r["DiscordUserID"] == member["DiscordUserID"] and r["FromDeptID"] == dept["DeptID"]
+    ]
+    if existing:
+        return jsonify({"error": "a promotion request is already pending"}), 400
+    request_id = create_promotion_request(
+        member["DiscordUserID"], session.get("staff_name", ""), dept["DeptID"], elig["next_dept"]["DeptID"]
+    )
+    return jsonify({"ok": True, "requestId": request_id})
+
+
+@staff_bp.route("/api/my-departments/clock-in", methods=["POST"])
+def api_my_clock_in():
+    if not _is_logged_in():
+        return jsonify({"error": "not logged in"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    member = _require_own_membership(membership_id)
+    if not member:
+        return jsonify({"error": "membership not found"}), 404
+    dept = get_department(member["DeptID"])
+    if not dept:
+        return jsonify({"error": "department not found"}), 404
+    if get_active_clock_session(member["DiscordUserID"], dept["DeptID"]):
+        return jsonify({"error": "already clocked in"}), 400
+
+    verified = False
+    if dept.get("RequireInGameToClockIn") == "true":
+        roblox_id = get_roblox_user_id_for_discord(member["DiscordUserID"])
+        if not roblox_id:
+            return jsonify({"error": "Link your Roblox account first (use /verify in Discord)."}), 400
+        if not is_user_in_game(roblox_id):
+            return jsonify({"error": "You must be connected to the live game to clock in for this department."}), 400
+        verified = True
+
+    session_id = clock_in(member["DiscordUserID"], session.get("staff_name", ""), dept["DeptID"], verified)
+    return jsonify({"ok": True, "sessionId": session_id})
+
+
+@staff_bp.route("/api/my-departments/clock-out", methods=["POST"])
+def api_my_clock_out():
+    if not _is_logged_in():
+        return jsonify({"error": "not logged in"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    membership_id = str(data.get("membershipId", "")).strip()
+    member = _require_own_membership(membership_id)
+    if not member:
+        return jsonify({"error": "membership not found"}), 404
+    active = get_active_clock_session(member["DiscordUserID"], member["DeptID"])
+    if not active:
+        return jsonify({"error": "not currently clocked in"}), 400
+    clock_out(active["SessionID"], performed_by=session.get("staff_name", ""))
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/my-departments/request-loa", methods=["POST"])
+def api_request_loa():
+    if not _is_logged_in():
+        return jsonify({"error": "not logged in"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    start_date = str(data.get("startDate", "")).strip()
+    end_date = str(data.get("endDate", "")).strip()
+    reason = str(data.get("reason", "")).strip()[:500]
+    if not start_date or not end_date:
+        return jsonify({"error": "startDate and endDate are required"}), 400
+    discord_id = session.get("staff_discord_id")
+    loa_id = create_loa_request(discord_id, session.get("staff_name", ""), start_date, end_date, reason)
+    return jsonify({"ok": True, "loaId": loa_id})
 
 
 PERMISSIONS_HTML = """
