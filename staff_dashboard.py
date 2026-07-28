@@ -851,6 +851,39 @@ def list_clock_sessions_for_user(discord_user_id: str) -> list:
     return list(reversed(rows))
 
 
+# — Training log: free-form record of training sessions given, separate from
+# both the department promotion checklist (fixed items, tied to one dept) and
+# Certifications (a formal badge). This is just "write down that X happened."
+
+TRAINING_LOG_SHEET = "TrainingLog"
+TRAINING_LOG_HEADERS = ["LogID", "DiscordUserID", "Training", "Notes", "TrainedBy", "TrainedAt"]
+
+
+def list_training_log(discord_user_id=None) -> list:
+    rows = _sheet_read_all(TRAINING_LOG_SHEET, TRAINING_LOG_HEADERS)
+    if discord_user_id:
+        rows = [r for r in rows if r["DiscordUserID"] == str(discord_user_id)]
+    return list(reversed(rows))
+
+
+def add_training_log_entry(discord_user_id: str, training: str, notes: str, trained_by: str) -> str:
+    log_id = uuid.uuid4().hex[:10]
+    record = {
+        "LogID": log_id,
+        "DiscordUserID": str(discord_user_id),
+        "Training": training,
+        "Notes": notes,
+        "TrainedBy": trained_by,
+        "TrainedAt": datetime.datetime.utcnow().isoformat(),
+    }
+    _sheet_append_row(TRAINING_LOG_SHEET, TRAINING_LOG_HEADERS, record)
+    return log_id
+
+
+def delete_training_log_entry(log_id: str):
+    _sheet_delete_row_by_key(TRAINING_LOG_SHEET, TRAINING_LOG_HEADERS, "LogID", log_id)
+
+
 # — Discord role sync on promotion approval —
 
 def sync_discord_role(discord_user_id: str, old_role_id: str, new_role_id: str):
@@ -2545,6 +2578,21 @@ function renderResult(data) {
   }
   html += `</table></div>`;
 
+  html += `<div class="card"><h2>Training log</h2>
+    <p class="hint">Write down any training session given — not limited to a department's checklist items.</p>
+    <input id="newTrainingName" placeholder="Training given" style="width:45%;">
+    <input id="newTrainingNotes" placeholder="Notes (optional)" style="width:40%;">
+    <button onclick="addTrainingLog()">Add</button>
+    <pre class="output" id="trainingResult"></pre>
+    <table style="margin-top:10px;"><tr><th>When</th><th>Training</th><th>Notes</th><th>By</th><th></th></tr>`;
+  if (data.trainingLog.length === 0) {
+    html += `<tr><td colspan="5" class="empty">No training logged yet.</td></tr>`;
+  }
+  for (const t of data.trainingLog) {
+    html += `<tr><td>${escapeHtml((t.TrainedAt || "").slice(0, 16))}</td><td>${escapeHtml(t.Training)}</td><td>${escapeHtml(t.Notes)}</td><td>${escapeHtml(t.TrainedBy)}</td><td><button class="danger" data-log="${t.LogID}" onclick="deleteTrainingLog(this.dataset.log)">Remove</button></td></tr>`;
+  }
+  html += `</table></div>`;
+
   html += `<div class="card"><h2>Leave of absence history</h2><table><tr><th>Start</th><th>End</th><th>Reason</th><th>Status</th></tr>`;
   if (data.loaHistory.length === 0) {
     html += `<tr><td colspan="4" class="empty">No LOA history.</td></tr>`;
@@ -2618,6 +2666,23 @@ async function deleteCert(certId) {
   await call("/staff/api/database/certifications/delete", {certId});
   lookup();
 }
+
+async function addTrainingLog() {
+  const training = document.getElementById("newTrainingName").value;
+  const notes = document.getElementById("newTrainingNotes").value;
+  if (!training.trim()) return;
+  const data = await call("/staff/api/database/training/add", {discordUserId: currentLookupId, training, notes});
+  if (data.ok) {
+    lookup();
+  } else {
+    document.getElementById("trainingResult").textContent = JSON.stringify(data, null, 2);
+  }
+}
+
+async function deleteTrainingLog(logId) {
+  await call("/staff/api/database/training/delete", {logId});
+  lookup();
+}
 </script>
 </body></html>
 """
@@ -2670,6 +2735,7 @@ def api_database_lookup():
         "certifications": list_certifications(discord_user_id),
         "loaHistory": list_loa(discord_user_id=discord_user_id),
         "clockHistory": list_clock_sessions_for_user(discord_user_id)[:20],
+        "trainingLog": list_training_log(discord_user_id),
     })
 
 
@@ -2725,6 +2791,34 @@ def api_database_delete_cert():
     if not cert_id:
         return jsonify({"error": "certId is required"}), 400
     delete_certification(cert_id)
+    return jsonify({"ok": True})
+
+
+@staff_bp.route("/api/database/training/add", methods=["POST"])
+def api_database_add_training():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    discord_user_id = str(data.get("discordUserId", "")).strip()
+    training = str(data.get("training", "")).strip()[:150]
+    notes = str(data.get("notes", "")).strip()[:500]
+    if not discord_user_id or not training:
+        return jsonify({"error": "discordUserId and training are required"}), 400
+    log_id = add_training_log_entry(discord_user_id, training, notes, session.get("staff_name", ""))
+    return jsonify({"ok": True, "logId": log_id})
+
+
+@staff_bp.route("/api/database/training/delete", methods=["POST"])
+def api_database_delete_training():
+    guard = _api_permission_guard("view_database")
+    if guard:
+        return guard
+    data = request.get_json(force=True, silent=True) or {}
+    log_id = str(data.get("logId", "")).strip()
+    if not log_id:
+        return jsonify({"error": "logId is required"}), 400
+    delete_training_log_entry(log_id)
     return jsonify({"ok": True})
 
 
